@@ -13,8 +13,10 @@ import { PhotoClusterCard } from "./components/photo-cluster-card";
 import { PhotoContextMenu } from "./components/photo-context-menu";
 import {
     type RankFeedback,
+    type ScoreState,
     RankingOverlay,
 } from "./components/ranking-overlay";
+import { RatingsDictionaryModal } from "./components/ratings-dictionary-modal";
 import {
     addPhotosToClusters,
     checksumBlob,
@@ -25,8 +27,11 @@ import {
 import {
     clearBrowserData,
     loadClusters,
+    loadRatingsDictionary,
     saveClusters,
     saveLabelLog,
+    saveRatingsDictionary,
+    saveScoreLog,
 } from "./lib/browser-storage";
 import { resizePhotosForLabeling } from "./lib/image-resize";
 import {
@@ -40,6 +45,8 @@ import type {
 } from "./lib/ranking-types";
 import {
     labelStackResponseSchema,
+    scoreStackResponseSchema,
+    type ExistingRatings,
     type MealCategory,
     type RestaurantSelection,
 } from "./lib/stack-schema";
@@ -61,6 +68,12 @@ export default function Home() {
     const [rankingLaunching, setRankingLaunching] = useState(false);
     const [rankingProgress, setRankingProgress] =
         useState<RankingSessionStatus | null>(null);
+    const [ratingsDictionary, setRatingsDictionary] = useState<{
+        entries: ExistingRatings;
+        syncedAt: string | null;
+    }>({ entries: {}, syncedAt: null });
+    const [ratingsDictionaryOpen, setRatingsDictionaryOpen] = useState(false);
+    const [scoreState, setScoreState] = useState<ScoreState>({ status: "idle" });
     const rankingSessionId = rankingProgress?.id ?? null;
     const rankingSessionState = rankingProgress?.state ?? null;
     const inputRef = useRef<HTMLInputElement>(null);
@@ -116,6 +129,21 @@ export default function Home() {
         return () => {
             cancelled = true;
         };
+    }, []);
+
+    useEffect(() => {
+        void loadRatingsDictionary()
+            .then((dictionary) => {
+                if (dictionary) {
+                    setRatingsDictionary({
+                        entries: dictionary.entries,
+                        syncedAt: dictionary.syncedAt,
+                    });
+                }
+            })
+            .catch((error) =>
+                console.error("Could not restore saved ratings", error),
+            );
     }, []);
 
     useEffect(() => {
@@ -459,6 +487,52 @@ export default function Home() {
         setDraggingOver(false);
     };
 
+    const computeScore = async (input: {
+        rating: RankFeedback["rating"];
+        text: string;
+        source: "typed" | "voice";
+    }) => {
+        if (!rankingClusterId || !input.rating) return;
+        const cluster = clusters.find((item) => item.id === rankingClusterId);
+        if (!cluster) return;
+        const restaurantName =
+            cluster.selection?.name ?? cluster.match?.selected?.name ?? "";
+        setScoreState({ status: "loading" });
+        try {
+            const runId = crypto.randomUUID();
+            const response = await fetch("/api/score", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    runId,
+                    stackId: cluster.id,
+                    restaurantName,
+                    rating: input.rating,
+                    review: { text: input.text, source: input.source },
+                    existingRatings: ratingsDictionary.entries,
+                }),
+            });
+            const body = (await response.json()) as unknown;
+            if (!response.ok) {
+                const errorBody = body as { error?: string };
+                throw new Error(errorBody.error ?? "Could not compute a score");
+            }
+            const result = scoreStackResponseSchema.parse(body);
+            await saveScoreLog(runId, cluster.id, result);
+            setScoreState({
+                status: "ready",
+                score: result.score.score,
+                reasoning: result.score.reasoning,
+            });
+        } catch (error) {
+            setScoreState({
+                status: "error",
+                error:
+                    error instanceof Error ? error.message : "Could not compute a score",
+            });
+        }
+    };
+
     const continueRanking = async (feedback: RankFeedback) => {
         if (!rankingClusterId || rankingLaunching) return;
         const cluster = clusters.find((item) => item.id === rankingClusterId);
@@ -495,6 +569,13 @@ export default function Home() {
                 JSON.stringify(feedback.photoDescriptions),
             );
             formData.set("visitDate", visitDate);
+            formData.set(
+                "existingRatings",
+                JSON.stringify(ratingsDictionary.entries),
+            );
+            if (feedback.score !== null) {
+                formData.set("computedScore", String(feedback.score));
+            }
             for (const photo of cluster.photos) {
                 formData.append("photos", photo.blob, photo.name);
             }
@@ -730,6 +811,7 @@ export default function Home() {
     const closeRanking = () => {
         setRankingClusterId(null);
         setRankingProgress(null);
+        setScoreState({ status: "idle" });
     };
 
     const cancelRanking = async () => {
@@ -819,6 +901,7 @@ export default function Home() {
                 onChooseFiles={chooseFiles}
                 onClear={clearAll}
                 onLabel={() => void labelClusters(unlabeledClusters)}
+                onOpenRatingsDictionary={() => setRatingsDictionaryOpen(true)}
             />
 
             {hasPhotos ? (
@@ -863,6 +946,7 @@ export default function Home() {
                                 }}
                                 onOpenRanking={(clusterId) => {
                                     setRankingProgress(null);
+                                    setScoreState({ status: "idle" });
                                     setRankingClusterId(clusterId);
                                 }}
                             />
@@ -894,6 +978,22 @@ export default function Home() {
             ) : null}
             </main>
 
+            {ratingsDictionaryOpen ? (
+                <RatingsDictionaryModal
+                    entries={ratingsDictionary.entries}
+                    syncedAt={ratingsDictionary.syncedAt}
+                    onClose={() => setRatingsDictionaryOpen(false)}
+                    onSave={(entries) => {
+                        const syncedAt = new Date().toISOString();
+                        setRatingsDictionary({ entries, syncedAt });
+                        void saveRatingsDictionary({ entries, syncedAt }).catch(
+                            (error) =>
+                                console.error("Could not save ratings", error),
+                        );
+                    }}
+                />
+            ) : null}
+
             {rankingCluster ? (
                 <RankingOverlay
                     restaurantName={
@@ -904,6 +1004,8 @@ export default function Home() {
                     photos={rankingCluster.photos}
                     launching={rankingLaunching}
                     progress={rankingProgress}
+                    scoreState={scoreState}
+                    onComputeScore={(input) => void computeScore(input)}
                     onCancel={closeRanking}
                     onCancelProcess={() => void cancelRanking()}
                     onContinue={(feedback) => void continueRanking(feedback)}

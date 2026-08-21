@@ -27,6 +27,8 @@ type StartAutomationInput = {
     description: string;
     photoDescriptions: string[];
     visitDate: string;
+    existingRatings: Record<string, number>;
+    computedScore: number | null;
     photos: File[];
 };
 
@@ -100,7 +102,7 @@ async function compileAutomation() {
     return outputPath;
 }
 
-async function getAutomationBinary() {
+export async function getAutomationBinary() {
     globalSessions.autoBeliCompilePromise ??= compileAutomation().finally(() => {
         globalSessions.autoBeliCompilePromise = undefined;
     });
@@ -268,6 +270,8 @@ export async function startBeliAutomation(input: StartAutomationInput) {
             description: input.description,
             photoDescriptions: input.photoDescriptions,
             visitDate: input.visitDate,
+            existingRatings: input.existingRatings,
+            computedScore: input.computedScore,
             photoPaths,
             debugDirectory: workDirectory,
         }),

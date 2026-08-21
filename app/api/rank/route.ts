@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { existingRatingsSchema } from "../../lib/stack-schema";
 import {
     cancelBeliAutomation,
     continueBeliPhotos,
@@ -33,6 +34,18 @@ const rankingRequestSchema = z.object({
         }
     }, z.array(z.string().min(1))),
     visitDate: z.iso.date(),
+    existingRatings: z.preprocess((value) => {
+        if (typeof value !== "string") return value;
+        try {
+            return JSON.parse(value) as unknown;
+        } catch {
+            return value;
+        }
+    }, existingRatingsSchema.default({})),
+    computedScore: z.preprocess(
+        (value) => (typeof value === "string" && value ? Number(value) : value),
+        z.number().min(0).max(10).nullable().default(null),
+    ),
 });
 
 const retryRequestSchema = z.object({
@@ -95,6 +108,8 @@ export async function POST(request: Request) {
             description: formData.get("description"),
             photoDescriptions: formData.get("photoDescriptions"),
             visitDate: formData.get("visitDate"),
+            existingRatings: formData.get("existingRatings"),
+            computedScore: formData.get("computedScore"),
         });
         const photos = formData
             .getAll("photos")

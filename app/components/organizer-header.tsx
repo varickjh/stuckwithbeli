@@ -9,6 +9,7 @@ type OrganizerHeaderProps = {
     onChooseFiles: () => void;
     onClear: () => void;
     onLabel: () => void;
+    onOpenRatingsDictionary: () => void;
 };
 
 export function OrganizerHeader({
@@ -20,6 +21,7 @@ export function OrganizerHeader({
     onChooseFiles,
     onClear,
     onLabel,
+    onOpenRatingsDictionary,
 }: OrganizerHeaderProps) {
     const labelText =
         unlabeledCount === mealCount
@@ -36,6 +38,13 @@ export function OrganizerHeader({
                     disabled={processing || labeling}
                 >
                     {hasPhotos ? "Add photos" : "Choose files"}
+                </button>
+                <button
+                    className="rounded-sm w-fit bg-transparent px-4 py-3 font-sans text-[15px] text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700"
+                    type="button"
+                    onClick={onOpenRatingsDictionary}
+                >
+                    My ratings
                 </button>
                 {hasPhotos ? (
                     <button

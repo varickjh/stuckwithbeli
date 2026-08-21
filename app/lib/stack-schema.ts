@@ -133,3 +133,49 @@ export const labelStackResponseSchema = z.object({
 });
 
 export type LabelStackResponse = z.infer<typeof labelStackResponseSchema>;
+
+export const reviewInputSchema = z.object({
+  text: z.string().min(1),
+  source: z.enum(["typed", "voice"]),
+});
+
+export type ReviewInput = z.infer<typeof reviewInputSchema>;
+
+export const scoreProviderSchema = z.enum(["codex-cli", "openrouter"]);
+export type ScoreProvider = z.infer<typeof scoreProviderSchema>;
+
+export const existingRatingsSchema = z.record(
+  z.string().min(1),
+  z.number().finite().min(0).max(10),
+);
+
+export type ExistingRatings = z.infer<typeof existingRatingsSchema>;
+
+export const scoreResultSchema = z.object({
+  runId: z.string(),
+  provider: scoreProviderSchema,
+  model: z.string(),
+  score: z.number().min(0).max(10),
+  reasoning: z.string().min(1),
+  scoredAt: z.string(),
+});
+
+export type ScoreResult = z.infer<typeof scoreResultSchema>;
+
+export const scoreStackRequestSchema = z.object({
+  runId: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
+  stackId: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
+  restaurantName: z.string().min(1),
+  rating: z.enum(["liked", "fine", "disliked"]),
+  review: reviewInputSchema,
+  existingRatings: existingRatingsSchema,
+});
+
+export type ScoreStackRequest = z.infer<typeof scoreStackRequestSchema>;
+
+export const scoreStackResponseSchema = z.object({
+  score: scoreResultSchema,
+  logDirectory: z.string(),
+});
+
+export type ScoreStackResponse = z.infer<typeof scoreStackResponseSchema>;

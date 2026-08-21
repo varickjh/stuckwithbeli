@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FaCheck } from "react-icons/fa6";
+import { FaCheck, FaMicrophone } from "react-icons/fa6";
 import SquareLoader from "react-spinners/SquareLoader";
 
 import type { Photo } from "../lib/photo-types";
@@ -14,13 +14,26 @@ export type RankFeedback = {
     rating: "liked" | "fine" | "disliked" | null;
     description: string;
     photoDescriptions: string[];
+    score: number | null;
 };
+
+export type ScoreState =
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "ready"; score: number; reasoning: string }
+    | { status: "error"; error: string };
 
 type RankingOverlayProps = {
     restaurantName: string;
     photos: Photo[];
     launching: boolean;
     progress: RankingSessionStatus | null;
+    scoreState: ScoreState;
+    onComputeScore: (input: {
+        rating: RankFeedback["rating"];
+        text: string;
+        source: "typed" | "voice";
+    }) => void;
     onCancel: () => void;
     onCancelProcess: () => void;
     onContinue: (feedback: RankFeedback) => void;
@@ -32,6 +45,36 @@ type RankingOverlayProps = {
     onSkipPhotos: () => void;
     onFinished: () => void;
 };
+
+type SpeechRecognitionLike = {
+    lang: string;
+    interimResults: boolean;
+    continuous: boolean;
+    onresult: ((event: unknown) => void) | null;
+    onend: (() => void) | null;
+    onerror: (() => void) | null;
+    start: () => void;
+    stop: () => void;
+};
+
+function getSpeechRecognitionConstructor(): (new () => SpeechRecognitionLike) | null {
+    if (typeof window === "undefined") return null;
+    const anyWindow = window as unknown as {
+        SpeechRecognition?: new () => SpeechRecognitionLike;
+        webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+    };
+    return anyWindow.SpeechRecognition ?? anyWindow.webkitSpeechRecognition ?? null;
+}
+
+function extractTranscript(event: unknown): string {
+    const results = (event as { results?: ArrayLike<ArrayLike<{ transcript?: string }>> })
+        .results;
+    if (!results) return "";
+    return Array.from(results)
+        .map((result) => result[0]?.transcript ?? "")
+        .join(" ")
+        .trim();
+}
 
 const ratings = [
     { value: "liked", label: "I liked it!", color: "bg-[#74b894]" },
@@ -52,6 +95,8 @@ export function RankingOverlay({
     photos,
     launching,
     progress,
+    scoreState,
+    onComputeScore,
     onCancel,
     onCancelProcess,
     onContinue,
@@ -65,10 +110,46 @@ export function RankingOverlay({
 }: RankingOverlayProps) {
     const [rating, setRating] = useState<RankFeedback["rating"]>(null);
     const [description, setDescription] = useState("");
+    const [reviewSource, setReviewSource] = useState<"typed" | "voice">("typed");
+    const [editableScore, setEditableScore] = useState<number | null>(null);
+    const [recording, setRecording] = useState(false);
     const [photoDescriptions, setPhotoDescriptions] = useState<Record<string, string>>(
         {},
     );
     const dialogRef = useRef<HTMLDivElement>(null);
+    const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+    const speechAvailable = getSpeechRecognitionConstructor() !== null;
+
+    useEffect(() => {
+        if (scoreState.status === "ready") setEditableScore(scoreState.score);
+    }, [scoreState]);
+
+    const toggleRecording = () => {
+        if (recording) {
+            recognitionRef.current?.stop();
+            return;
+        }
+        const Recognition = getSpeechRecognitionConstructor();
+        if (!Recognition) return;
+        const recognition = new Recognition();
+        recognition.lang = "en-US";
+        recognition.interimResults = false;
+        recognition.continuous = false;
+        recognition.onresult = (event) => {
+            const transcript = extractTranscript(event);
+            if (transcript) {
+                setDescription((current) =>
+                    current.trim() ? `${current.trim()} ${transcript}` : transcript,
+                );
+                setReviewSource("voice");
+            }
+        };
+        recognition.onend = () => setRecording(false);
+        recognition.onerror = () => setRecording(false);
+        recognitionRef.current = recognition;
+        setRecording(true);
+        recognition.start();
+    };
 
     useEffect(() => {
         const previousOverflow = document.body.style.overflow;
@@ -327,13 +408,81 @@ export function RankingOverlay({
                             })}
                         </div>
 
-                        <textarea
-                            className="mt-10 min-h-48 w-full resize-none rounded-sm bg-neutral-100 p-4 text-sm font-normal text-neutral-950 outline-none placeholder:text-neutral-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
-                            aria-label="Description"
-                            value={description}
-                            placeholder="Add a description (optional)"
-                            onChange={(event) => setDescription(event.target.value)}
-                        />
+                        <div className="relative mt-10">
+                            <textarea
+                                className="min-h-48 w-full resize-none rounded-sm bg-neutral-100 p-4 pr-14 text-sm font-normal text-neutral-950 outline-none placeholder:text-neutral-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                                aria-label="Review"
+                                value={description}
+                                placeholder="Add a review, typed or by voice (optional)"
+                                onChange={(event) => {
+                                    setDescription(event.target.value);
+                                    setReviewSource("typed");
+                                }}
+                            />
+                            {speechAvailable ? (
+                                <button
+                                    className={`absolute right-3 top-3 grid size-9 place-items-center rounded-full transition-colors ${recording ? "bg-accent text-white" : "bg-neutral-200 text-neutral-600 hover:bg-neutral-300"}`}
+                                    type="button"
+                                    aria-pressed={recording}
+                                    aria-label={recording ? "Stop recording" : "Record a review"}
+                                    onClick={toggleRecording}
+                                >
+                                    <FaMicrophone className="size-4" />
+                                </button>
+                            ) : null}
+                        </div>
+
+                        {description.trim() ? (
+                            <div className="mt-4 flex flex-col gap-3">
+                                <button
+                                    className="w-fit rounded-sm bg-neutral-100 px-4 py-2 text-xs text-neutral-700 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                                    type="button"
+                                    disabled={!rating || scoreState.status === "loading"}
+                                    onClick={() =>
+                                        onComputeScore({
+                                            rating,
+                                            text: description,
+                                            source: reviewSource,
+                                        })
+                                    }
+                                >
+                                    {scoreState.status === "loading"
+                                        ? "Scoring…"
+                                        : "Compute score from review"}
+                                </button>
+
+                                {scoreState.status === "ready" ? (
+                                    <div className="rounded-sm bg-neutral-100 p-4 text-sm text-neutral-700">
+                                        <label className="flex items-center gap-3">
+                                            <span className="font-semibold text-neutral-950">
+                                                Score
+                                            </span>
+                                            <input
+                                                className="w-20 rounded-sm bg-white px-2 py-1 text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                                                type="number"
+                                                min={0}
+                                                max={10}
+                                                step={0.1}
+                                                value={editableScore ?? scoreState.score}
+                                                onChange={(event) =>
+                                                    setEditableScore(
+                                                        Number(event.target.value),
+                                                    )
+                                                }
+                                            />
+                                        </label>
+                                        <p className="mt-2 text-neutral-500">
+                                            {scoreState.reasoning}
+                                        </p>
+                                    </div>
+                                ) : null}
+                                {scoreState.status === "error" ? (
+                                    <p className="text-sm text-[#c25b5f]">
+                                        {scoreState.error}
+                                    </p>
+                                ) : null}
+                            </div>
+                        ) : null}
 
                         <div className="mt-5 flex gap-3">
                             <button
@@ -355,6 +504,10 @@ export function RankingOverlay({
                                         photoDescriptions: photos.map((photo) =>
                                             photoDescriptions[photo.id]?.trim() || "Menu"
                                         ),
+                                        score:
+                                            scoreState.status === "ready"
+                                                ? (editableScore ?? scoreState.score)
+                                                : null,
                                     })
                                 }
                             >

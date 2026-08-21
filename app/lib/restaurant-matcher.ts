@@ -1,11 +1,9 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 
 import type { LabelPhotoInput } from "./photo-types";
+import { getProviderRuntime } from "./provider-runtime";
 import { serializeError } from "./run-logs";
 import {
   MEAL_CATEGORIES,
@@ -16,65 +14,16 @@ import {
   type PlaceCandidate,
 } from "./stack-schema";
 
-const execFileAsync = promisify(execFile);
 const CODEX_MODEL = "gpt-5.6-luna";
 const OPENROUTER_MODEL = "openai/gpt-5.6-luna";
-const MINIMUM_CODEX_VERSION = [0, 144, 0] as const;
 
 type MatchLogger = {
   write: (name: string, value: unknown) => Promise<void>;
 };
 
-function parseVersion(value: string) {
-  const match = value.match(/(\d+)\.(\d+)\.(\d+)/);
-  return match ? match.slice(1).map(Number) : null;
-}
-
-function isCompatibleVersion(version: number[] | null) {
-  if (!version) return false;
-  for (let index = 0; index < MINIMUM_CODEX_VERSION.length; index += 1) {
-    if (version[index] > MINIMUM_CODEX_VERSION[index]) return true;
-    if (version[index] < MINIMUM_CODEX_VERSION[index]) return false;
-  }
-  return true;
-}
-
-async function inspectCodex() {
-  if (Number(process.versions.node.split(".")[0]) < 22) {
-    return {
-      available: false as const,
-      reason: "The Codex provider requires Node.js 22 or newer",
-    };
-  }
-
-  try {
-    const { stdout, stderr } = await execFileAsync("codex", ["--version"], {
-      timeout: 5_000,
-    });
-    const versionOutput = `${stdout} ${stderr}`.trim();
-    if (!isCompatibleVersion(parseVersion(versionOutput))) {
-      return {
-        available: false as const,
-        reason: `Codex ${versionOutput || "version unknown"} is older than 0.144.0`,
-      };
-    }
-    return { available: true as const, versionOutput };
-  } catch (error) {
-    return {
-      available: false as const,
-      reason: error instanceof Error ? error.message : "Codex is unavailable",
-    };
-  }
-}
-
 export async function getLabelRuntime() {
-  const codex = await inspectCodex();
-  return {
-    provider: (codex.available ? "codex-cli" : "openrouter") as LabelProvider,
-    codex,
-    openRouterConfigured: Boolean(process.env.OPENROUTER_API_KEY),
-    googlePlacesConfigured: Boolean(process.env.GOOGLE_MAPS_PLACES_API_KEY),
-  };
+  const runtime = await getProviderRuntime();
+  return { ...runtime, provider: runtime.provider as LabelProvider };
 }
 
 function imageParts(photos: LabelPhotoInput[]) {

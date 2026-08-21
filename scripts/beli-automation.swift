@@ -1,6 +1,8 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import CoreImage
+import CoreMedia
 import Foundation
 import ImageIO
 import ScreenCaptureKit
@@ -17,6 +19,10 @@ private struct AutomationConfiguration: Decodable {
     let photoPaths: [String]
     let photoDescriptions: [String]?
     let debugDirectory: String?
+    // Populated once `compare_restaurants` duel automation is implemented;
+    // decoded now so config.json's shape doesn't need to change again then.
+    let existingRatings: [String: Double]?
+    let computedScore: Double?
 }
 
 private struct OCRItem: Encodable {
@@ -1255,6 +1261,390 @@ private final class BeliAutomation {
     }()
 }
 
+// Groups OCR items from a Beli "My Lists" screen into (name, score) rows.
+// Vision returns each visual line as one OCR item, and Beli numbers every row
+// ("1. Kaiten Sushi Ginza Onodera"), so titles are found via that numbering
+// prefix rather than fuzzy y-clustering (an earlier attempt at bucket-averaging
+// nearby lines "chained" the title and the price/cuisine line below it together
+// -- calibrated against a real screenshot via `--ratings-debug`).
+// A restaurant whose score is locked (Beli hides it until 10+ ratings in that
+// category) has no nearby numeric item and is skipped rather than guessed at.
+private func groupRatingsRows(_ items: [OCRItem]) -> [(name: String, score: Double)] {
+    let titlePrefix = "^\\d{1,3}\\.\\s+"
+    let scoreRowTolerance = 0.015
+
+    let titles = items.filter { $0.text.range(of: titlePrefix, options: .regularExpression) != nil }
+    let scores = items.compactMap { item -> (item: OCRItem, value: Double)? in
+        guard item.text.range(of: "^\\d{1,2}\\.\\d{1,2}$", options: .regularExpression) != nil,
+              let value = Double(item.text), (0...10).contains(value) else { return nil }
+        return (item, value)
+    }
+
+    return titles.compactMap { title -> (name: String, score: Double)? in
+        let nearby = scores
+            .filter { abs($0.item.center.y - title.center.y) < scoreRowTolerance }
+            .sorted { abs($0.item.center.y - title.center.y) < abs($1.item.center.y - title.center.y) }
+        guard let score = nearby.first else { return nil }
+
+        let name = title.text
+            .replacingOccurrences(of: titlePrefix, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        return (name: name, score: score.value)
+    }
+}
+
+private func normalizeRatingName(_ string: String) -> String {
+    string
+        .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+// A ScreenCaptureKit STREAM (continuous capture), unlike PhoneScreenshot's
+// one-off SCScreenshotManager.captureImage calls. Confirmed on-device: Beli
+// detects discrete screenshots and responds with its own share-sheet nudge
+// (the same thing happens when manually screenshotting the phone), but does
+// NOT react to screen recording. Pulling still frames from a running stream
+// avoids ever taking an actual "screenshot" of the phone.
+private actor FrameBox {
+    private var latestImage: CGImage?
+    private var waiters: [CheckedContinuation<CGImage, Error>] = []
+
+    func setLatest(_ image: CGImage) {
+        latestImage = image
+        let pending = waiters
+        waiters = []
+        for waiter in pending {
+            waiter.resume(returning: image)
+        }
+    }
+
+    func image() async throws -> CGImage {
+        if let latestImage { return latestImage }
+        return try await withCheckedThrowingContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+}
+
+private final class StreamingPhoneScreenshot: NSObject, SCStreamOutput {
+    let window: SCWindow
+    private let stream: SCStream
+    private let frameBox = FrameBox()
+    private let ciContext = CIContext()
+
+    private init(window: SCWindow, stream: SCStream) {
+        self.window = window
+        self.stream = stream
+        super.init()
+    }
+
+    static func start() async throws -> StreamingPhoneScreenshot {
+        let content = try await SCShareableContent.excludingDesktopWindows(
+            false,
+            onScreenWindowsOnly: true
+        )
+        guard let phoneWindow = content.windows.first(where: { window in
+            let appName = window.owningApplication?.applicationName.lowercased() ?? ""
+            return appName.contains("iphone mirroring")
+        }) else {
+            throw AutomationFailure.message("iPhone Mirroring is not open.")
+        }
+
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let configuration = SCStreamConfiguration()
+        configuration.width = max(1, Int(phoneWindow.frame.width * scale))
+        configuration.height = max(1, Int(phoneWindow.frame.height * scale))
+        configuration.showsCursor = false
+        configuration.capturesAudio = false
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 5)
+        configuration.queueDepth = 3
+
+        let filter = SCContentFilter(desktopIndependentWindow: phoneWindow)
+        let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
+        let capture = StreamingPhoneScreenshot(window: phoneWindow, stream: stream)
+        try stream.addStreamOutput(
+            capture,
+            type: .screen,
+            sampleHandlerQueue: DispatchQueue(label: "auto-beli.ratings-export.stream")
+        )
+        try await stream.startCapture()
+        return capture
+    }
+
+    func stop() async {
+        try? await stream.stopCapture()
+    }
+
+    func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of outputType: SCStreamOutputType
+    ) {
+        guard outputType == .screen,
+              CMSampleBufferIsValid(sampleBuffer),
+              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        else { return }
+        let ciImage = CIImage(cvImageBuffer: imageBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+
+        let box = frameBox
+        Task { await box.setLatest(cgImage) }
+    }
+
+    func image() async throws -> CGImage {
+        try await frameBox.image()
+    }
+}
+
+// Drives a live export of the user's own Beli ratings list into a name->score
+// dictionary. Assumes the phone is ALREADY showing that list (the user navigates
+// there manually before starting the export) so this never has to guess Beli's
+// tab/navigation labels -- it only scrolls, reads, and dedupes from wherever the
+// screen currently is, stopping once scrolling produces no more new rows.
+private final class RatingsExporter {
+    private let capture: StreamingPhoneScreenshot
+    private let visionQueue = DispatchQueue(label: "auto-beli.ratings-export.vision")
+    private let eventSource = CGEventSource(stateID: .hidSystemState)
+
+    init() async throws {
+        capture = try await StreamingPhoneScreenshot.start()
+    }
+
+    private func recognizeText(in image: CGImage) throws -> [OCRItem] {
+        try visionQueue.sync {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["en-US"]
+            request.minimumTextHeight = 0.006
+            let handler = VNImageRequestHandler(cgImage: image, options: [:])
+            try handler.perform([request])
+            return (request.results ?? []).compactMap { observation in
+                guard let candidate = observation.topCandidates(1).first else { return nil }
+                let box = observation.boundingBox
+                return OCRItem(
+                    text: candidate.string,
+                    confidence: candidate.confidence,
+                    x: box.minX,
+                    y: 1 - box.maxY,
+                    width: box.width,
+                    height: box.height
+                )
+            }
+        }
+    }
+
+    private func activatePhoneWindow() {
+        guard let app = NSRunningApplication(
+            processIdentifier: capture.window.owningApplication?.processID ?? 0
+        ) else { return }
+        app.activate(options: [])
+    }
+
+    // A click-drag swipe (tried as an alternative to scroll-wheel events,
+    // since a double scroll-wheel tick was observed to open Beli's share
+    // sheet) did not register as a scroll at all, even with generous manual
+    // pacing. Falls back to scroll-wheel with a SINGLE tick per call --
+    // the double-tick (two ticks 45ms apart) is the specific thing under
+    // suspicion for being misread as some other gesture.
+    private func scrollDown() {
+        // Deliberately does NOT re-activate the window here -- export()
+        // activates it once at the start, and repeatedly reactivating an
+        // already-frontmost app on every scroll (18+ times a run) is under
+        // suspicion for destabilizing something that opens Beli's share sheet.
+        let point = CGPoint(
+            x: capture.window.frame.minX + 0.5 * capture.window.frame.width,
+            y: capture.window.frame.minY + 0.62 * capture.window.frame.height
+        )
+        CGWarpMouseCursorPosition(point)
+        CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )?.post(tap: .cghidEventTap)
+        usleep(70_000)
+        CGEvent(
+            scrollWheelEvent2Source: eventSource,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: -320,
+            wheel2: 0,
+            wheel3: 0
+        )?.post(tap: .cghidEventTap)
+    }
+
+    private func imageFeature(_ image: CGImage) -> [Float] {
+        let size = 16
+        var pixels = [UInt8](repeating: 0, count: size * size * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: size,
+            height: size,
+            bitsPerComponent: 8,
+            bytesPerRow: size * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return [] }
+        let side = min(image.width, image.height)
+        let cropRect = CGRect(
+            x: (image.width - side) / 2,
+            y: (image.height - side) / 2,
+            width: side,
+            height: side
+        )
+        guard let crop = image.cropping(to: cropRect) else { return [] }
+        context.interpolationQuality = .medium
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: size, height: size))
+        var result: [Float] = []
+        result.reserveCapacity(size * size * 3)
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            result.append(Float(pixels[offset]) / 255)
+            result.append(Float(pixels[offset + 1]) / 255)
+            result.append(Float(pixels[offset + 2]) / 255)
+        }
+        return result
+    }
+
+    private func featureDistance(_ first: [Float], _ second: [Float]) -> Float {
+        guard first.count == second.count, !first.isEmpty else { return 1 }
+        var total: Float = 0
+        for index in first.indices {
+            let delta = first[index] - second[index]
+            total += delta * delta
+        }
+        return sqrt(total / Float(first.count))
+    }
+
+    private func emit(_ payload: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let line = String(data: data, encoding: .utf8) else { return }
+        print(line)
+        fflush(stdout)
+    }
+
+    private func writeOutput(_ ratings: [String: Double], to path: String) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: ratings,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(to: URL(fileURLWithPath: path))
+    }
+
+    func export(to outputPath: String) async throws -> Int {
+        do {
+            let count = try await runExport(to: outputPath)
+            await capture.stop()
+            return count
+        } catch {
+            await capture.stop()
+            throw error
+        }
+    }
+
+    private func runExport(to outputPath: String) async throws -> Int {
+        activatePhoneWindow()
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        var ratings: [String: Double] = [:]
+        var seenNormalizedNames: Set<String> = []
+        var previousFeature: [Float]?
+        var unchangedScreens = 0
+        var scrolls = 0
+
+        while unchangedScreens < 2 && scrolls < 400 {
+            let image = try await capture.image()
+            let items = try recognizeText(in: image)
+            let before = ratings.count
+            for row in groupRatingsRows(items) {
+                let key = normalizeRatingName(row.name)
+                guard !key.isEmpty, seenNormalizedNames.insert(key).inserted else { continue }
+                ratings[row.name] = row.score
+            }
+            if ratings.count != before {
+                try writeOutput(ratings, to: outputPath)
+                emit(["type": "diagnostic", "message": "Found \(ratings.count) ratings so far"])
+            }
+
+            // Beli shows an explicit "Looking for more restaurants to rank?"
+            // empty state at the true end of the list -- stop immediately
+            // instead of waiting for image-stagnation to confirm it, which
+            // wastes several extra scrolls past the real end.
+            let reachedEndOfList = items.contains {
+                normalizeRatingName($0.text).contains("looking for more restaurants")
+            }
+            if reachedEndOfList {
+                emit(["type": "diagnostic", "message": "Reached the end of the list"])
+                break
+            }
+
+            let feature = imageFeature(image)
+            if let previousFeature, featureDistance(previousFeature, feature) < 0.006 {
+                unchangedScreens += 1
+            } else {
+                unchangedScreens = 0
+            }
+            previousFeature = feature
+
+            if unchangedScreens < 2 {
+                scrollDown()
+                try await Task.sleep(nanoseconds: 550_000_000)
+                scrolls += 1
+            }
+        }
+
+        try writeOutput(ratings, to: outputPath)
+        return ratings.count
+    }
+}
+
+private func exportRatings(to outputPath: String) async {
+    do {
+        let exporter = try await RatingsExporter()
+        let count = try await exporter.export(to: outputPath)
+        print("{\"type\":\"complete\",\"count\":\(count)}")
+        fflush(stdout)
+    } catch {
+        let message = error.localizedDescription
+        if let data = try? JSONSerialization.data(withJSONObject: ["type": "error", "message": message]),
+           let line = String(data: data, encoding: .utf8) {
+            print(line)
+            fflush(stdout)
+        }
+        fputs("\(message)\n", stderr)
+        exit(1)
+    }
+}
+
+private func runRatingsDebugFixture(path: String) throws {
+    guard let image = BeliAutomation.loadFixtureImage(path) else {
+        throw AutomationFailure.message("The fixture image could not be read.")
+    }
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = true
+    request.minimumTextHeight = 0.006
+    try VNImageRequestHandler(cgImage: image).perform([request])
+    let items = (request.results ?? []).compactMap { observation -> OCRItem? in
+        guard let candidate = observation.topCandidates(1).first else { return nil }
+        let box = observation.boundingBox
+        return OCRItem(
+            text: candidate.string,
+            confidence: candidate.confidence,
+            x: box.minX,
+            y: 1 - box.maxY,
+            width: box.width,
+            height: box.height
+        )
+    }
+    let rows = groupRatingsRows(items)
+    for row in rows {
+        print("\(row.score)\t\(row.name)")
+    }
+    fputs("(\(rows.count) rows parsed from \(items.count) OCR items)\n", stderr)
+}
+
 private func runOCRFixture(path: String) throws {
     guard let image = BeliAutomation.loadFixtureImage(path) else {
         throw AutomationFailure.message("The fixture image could not be read.")
@@ -1329,6 +1719,84 @@ private struct Main {
         do {
             if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--ocr" {
                 try runOCRFixture(path: CommandLine.arguments[2])
+                return
+            }
+            if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--ratings-debug" {
+                try runRatingsDebugFixture(path: CommandLine.arguments[2])
+                return
+            }
+            if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--scroll-debug" {
+                try requireAutomationPermissions()
+                let capture = try await StreamingPhoneScreenshot.start()
+                let eventSource = CGEventSource(stateID: .hidSystemState)
+                let frame = capture.window.frame
+
+                print("[1/6] activating iPhone Mirroring window in 2s...")
+                fflush(stdout)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                if let app = NSRunningApplication(
+                    processIdentifier: capture.window.owningApplication?.processID ?? 0
+                ) {
+                    app.activate(options: [])
+                }
+
+                print("[2/6] activated. Grabbing a frame from the capture STREAM (not a one-off screenshot) in 2s...")
+                fflush(stdout)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                _ = try await capture.image()
+
+                let point = CGPoint(x: frame.minX + 0.5 * frame.width, y: frame.minY + 0.62 * frame.height)
+                print("[3/6] frame grabbed -- check nothing changed on screen. Warping cursor to \(point.x), \(point.y) in 2s...")
+                fflush(stdout)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                CGWarpMouseCursorPosition(point)
+
+                print("[4/6] cursor warped -- look at where it is now. Posting mouseMoved in 2s...")
+                fflush(stdout)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                CGEvent(
+                    mouseEventSource: eventSource,
+                    mouseType: .mouseMoved,
+                    mouseCursorPosition: point,
+                    mouseButton: .left
+                )?.post(tap: .cghidEventTap)
+
+                print("[5/6] mouseMoved posted -- check for any visible change. Posting a SINGLE scroll tick in 2s...")
+                fflush(stdout)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                CGEvent(
+                    scrollWheelEvent2Source: eventSource,
+                    units: .pixel,
+                    wheelCount: 1,
+                    wheel1: -320,
+                    wheel2: 0,
+                    wheel3: 0
+                )?.post(tap: .cghidEventTap)
+
+                print("[6/6] done -- check what happened on the phone screen.")
+                fflush(stdout)
+                await capture.stop()
+                return
+            }
+            if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--window-debug" {
+                try requireAutomationPermissions()
+                let capture = try await PhoneScreenshot()
+                let frame = capture.window.frame
+                let scale = NSScreen.main?.backingScaleFactor ?? 2
+                print("frame.minX=\(frame.minX) frame.minY=\(frame.minY) frame.width=\(frame.width) frame.height=\(frame.height) backingScaleFactor=\(scale)")
+                let scrollPoint = CGPoint(
+                    x: frame.minX + 0.5 * frame.width,
+                    y: frame.minY + 0.62 * frame.height
+                )
+                print("computed scroll point (global): \(scrollPoint.x), \(scrollPoint.y)")
+                for screen in NSScreen.screens {
+                    print("NSScreen frame: \(screen.frame) visibleFrame: \(screen.visibleFrame)")
+                }
+                return
+            }
+            if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--export-ratings" {
+                try requireAutomationPermissions()
+                await exportRatings(to: CommandLine.arguments[2])
                 return
             }
             if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--teal" {
