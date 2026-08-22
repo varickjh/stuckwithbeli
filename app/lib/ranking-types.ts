@@ -14,6 +14,10 @@ export const RANKING_STEPS = [
 export type RankingStepId = (typeof RANKING_STEPS)[number]["id"];
 export type RankingStepState = "pending" | "active" | "complete";
 
+export type DuelLogEntry = {
+    message: string;
+};
+
 export type RankingSessionStatus = {
     id: string;
     clusterId: string;
@@ -22,4 +26,5 @@ export type RankingSessionStatus = {
     steps: Record<RankingStepId, RankingStepState>;
     error: string | null;
     recovery: "photos_not_found" | null;
+    duelLog: DuelLogEntry[];
 };

@@ -155,6 +155,7 @@ async function runMatch(
       model: openrouter(OPENROUTER_MODEL),
       output: Output.object({ schema }),
       messages,
+      maxOutputTokens: 2000,
       providerOptions: {
         openrouter: {
           reasoning: { effort: "medium", exclude: true },

@@ -341,6 +341,14 @@ export function RankingOverlay({
                                                     ) : null}
                                                 </div>
                                             ) : null}
+                                            {step.id === "finish_in_beli" &&
+                                            progress.duelLog.length ? (
+                                                <ul className="mt-2 flex list-none flex-col gap-1 p-0 text-xs text-neutral-500">
+                                                    {progress.duelLog.map((entry, index) => (
+                                                        <li key={index}>{entry.message}</li>
+                                                    ))}
+                                                </ul>
+                                            ) : null}
                                         </div>
                                     </li>
                                 );
@@ -434,23 +442,6 @@ export function RankingOverlay({
 
                         {description.trim() ? (
                             <div className="mt-4 flex flex-col gap-3">
-                                <button
-                                    className="w-fit rounded-sm bg-neutral-100 px-4 py-2 text-xs text-neutral-700 transition-colors hover:bg-neutral-200 disabled:opacity-50"
-                                    type="button"
-                                    disabled={!rating || scoreState.status === "loading"}
-                                    onClick={() =>
-                                        onComputeScore({
-                                            rating,
-                                            text: description,
-                                            source: reviewSource,
-                                        })
-                                    }
-                                >
-                                    {scoreState.status === "loading"
-                                        ? "Scoring…"
-                                        : "Compute score from review"}
-                                </button>
-
                                 {scoreState.status === "ready" ? (
                                     <div className="rounded-sm bg-neutral-100 p-4 text-sm text-neutral-700">
                                         <label className="flex items-center gap-3">
@@ -496,8 +487,19 @@ export function RankingOverlay({
                             <button
                                 className="rounded-sm bg-accent px-6 py-3 text-sm text-white transition-colors hover:bg-accent/85 disabled:opacity-50"
                                 type="button"
-                                disabled={launching || !rating}
-                                onClick={() =>
+                                disabled={launching || !rating || scoreState.status === "loading"}
+                                onClick={() => {
+                                    const needsScore =
+                                        description.trim().length > 0 &&
+                                        scoreState.status !== "ready";
+                                    if (needsScore) {
+                                        onComputeScore({
+                                            rating,
+                                            text: description,
+                                            source: reviewSource,
+                                        });
+                                        return;
+                                    }
                                     onContinue({
                                         rating,
                                         description,
@@ -508,10 +510,12 @@ export function RankingOverlay({
                                             scoreState.status === "ready"
                                                 ? (editableScore ?? scoreState.score)
                                                 : null,
-                                    })
-                                }
+                                    });
+                                }}
                             >
-                                Continue
+                                {scoreState.status === "loading"
+                                    ? "Computing score…"
+                                    : "Continue"}
                             </button>
                         </div>
                     </>

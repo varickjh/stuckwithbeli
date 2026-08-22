@@ -100,14 +100,22 @@ private final class PhoneScreenshot {
 private final class BeliAutomation {
     private let configuration: AutomationConfiguration
     private let startStep: String
-    private let capture: PhoneScreenshot
+    // A continuous ScreenCaptureKit stream, not one-off screenshots -- Beli
+    // detects discrete screenshots and responds with its own share-sheet
+    // nudge (confirmed live, see StreamingPhoneScreenshot), which would
+    // otherwise interrupt every OCR-driven step in this whole automation.
+    private let capture: StreamingPhoneScreenshot
     private let visionQueue = DispatchQueue(label: "auto-beli.vision")
     private let eventSource = CGEventSource(stateID: .hidSystemState)
 
     init(configuration: AutomationConfiguration, startStep: String) async throws {
         self.configuration = configuration
         self.startStep = startStep
-        capture = try await PhoneScreenshot()
+        capture = try await StreamingPhoneScreenshot.start()
+    }
+
+    fileprivate func cleanup() async {
+        await capture.stop()
     }
 
     func run() async throws {
@@ -161,7 +169,12 @@ private final class BeliAutomation {
         let result = try await waitForText(prefix, timeout: 45) { item in
             item.center.y > currentLocation.center.y + 0.025
         }
-        try await clickDetectedTarget(result.center)
+        // Tap the restaurant NAME (not the row's own "+"/bookmark icons,
+        // which are a different action -- confirmed live) to open its
+        // profile page, where start_rating finds the teal rating button.
+        // A single tap silently failed to register here too (same class of
+        // issue found elsewhere in this flow) -- double-tap instead.
+        try await clickThroughScreenshot(result.center)
         try await pause(1.5)
         finish("find_restaurant")
     }
@@ -181,6 +194,55 @@ private final class BeliAutomation {
             CGPoint(x: ratingLabel.center.x, y: max(0.05, ratingLabel.center.y - 0.055))
         )
         finish("add_rating")
+    }
+
+
+    // Duels ("Which do you prefer?") appear AFTER tapping "Okay" on the full
+    // form, as part of finishingInBeli()'s wait for the share page -- NOT
+    // right after picking a tier (confirmed live; an earlier attempt at a
+    // separate compare_restaurants step between add_rating and add_notes
+    // was wrong). Called from within that step's polling loop.
+    private func resolveAnyPendingDuels() async throws {
+        let deadline = Date().addingTimeInterval(10 * 60)
+        var duelCount = 0
+
+        while Date() < deadline && duelCount < 60 {
+            let image = try await capture.image()
+            let items = try recognizeText(in: image)
+
+            guard let duel = parseDuelScreen(items) else { break }
+            duelCount += 1
+
+            guard let opponentScore = duel.opponentScore,
+                  let computedScore = configuration.computedScore
+            else {
+                if let tooTough = try? await findText("too tough", timeout: 3) {
+                    try await clickDetectedTarget(tooTough.center)
+                }
+                emit(
+                    type: "duel",
+                    step: "finish_in_beli",
+                    message: "Duel \(duelCount): could not read opponent score or no computed score, used Too tough"
+                )
+                try await pause(0.9)
+                continue
+            }
+
+            let chooseNew = computedScore > opponentScore
+            let tapRightSide = chooseNew ? !duel.opponentOnRight : duel.opponentOnRight
+            let tapPoint = CGPoint(x: tapRightSide ? 0.72 : 0.28, y: duel.opponentLineY - 0.03)
+            try await clickDetectedTarget(tapPoint)
+            emit(
+                type: "duel",
+                step: "finish_in_beli",
+                message: "Duel \(duelCount): opponent \(opponentScore), computed \(computedScore), chose \(chooseNew ? "new restaurant" : "opponent")"
+            )
+            try await pause(0.9)
+        }
+
+        if duelCount >= 60 {
+            throw AutomationFailure.message("Too many comparison rounds -- please finish ranking manually.")
+        }
     }
 
     private func startingRating() async throws {
@@ -223,10 +285,33 @@ private final class BeliAutomation {
             let addNotes = try await waitForText("add notes", timeout: 20)
             try await clickDetectedTarget(addNotes.center)
             let textArea = try await waitForText("tips, tricks", timeout: 20)
-            try await clickDetectedTarget(textArea.center)
+            // A single tap silently failed to focus small targets elsewhere
+            // in this flow (confirmed live) -- use the same double-tap
+            // workaround already established for the teal button.
+            try await clickThroughScreenshot(textArea.center)
             try typeText(configuration.description)
+            // Verify the placeholder actually disappeared (i.e. the field
+            // received the text) before tapping Done -- a focus click that
+            // silently failed would otherwise leave the note empty.
+            if try await findText("tips, tricks", timeout: 2) != nil {
+                throw AutomationFailure.message("The notes field did not receive the typed text.")
+            }
             let done = try await waitForText("done", timeout: 15) { $0.center.y < 0.18 }
-            try await clickDetectedTarget(done.center)
+            // A fixed double-tap still wasn't reliably dismissing this sheet
+            // (confirmed live) -- retry tapping Done until the sheet is
+            // actually confirmed closed, rather than guessing a tap count.
+            var closed = false
+            for _ in 0..<5 {
+                try await clickDetectedTarget(done.center)
+                try await pause(0.6)
+                if try await findText("your notes", timeout: 2, predicate: { $0.center.y < 0.18 }) == nil {
+                    closed = true
+                    break
+                }
+            }
+            guard closed else {
+                throw AutomationFailure.message("Could not close the notes editor.")
+            }
         }
         finish("add_notes")
     }
@@ -272,50 +357,50 @@ private final class BeliAutomation {
         start("add_photos")
         let addPhotos = try await waitForText("add photos", timeout: 20)
         try await clickDetectedTarget(addPhotos.center)
+        try await pause(1.0)
 
-        var album: OCRItem?
-        var collectionsIsOpen = false
-        for _ in 0..<3 {
-            let collections = try await waitForText("collections", timeout: 15) {
-                $0.center.y < 0.2
-            }
-            try await pause(0.5)
-            try await clickDetectedTarget(collections.center)
-            try await pause(0.8)
-
-            album = try await findText("beli", timeout: 2) {
-                $0.center.y > 0.15
-            }
-            if album != nil {
-                collectionsIsOpen = true
-                break
-            }
-            let albums = try await findText("albums", timeout: 2) {
-                $0.center.y > 0.15
-            }
-            if albums != nil {
-                collectionsIsOpen = true
-                break
+        // No "Beli" album navigation needed -- selectPhotos() already finds
+        // target photos by visual pixel-signature matching while scrolling
+        // whatever grid it's shown. Instead of scrolling blind through
+        // Recents, search the visit date first (confirmed live: the
+        // system photo picker's search bar accepts a natural-language date
+        // like "August 9, 2026" and surfaces a date suggestion chip that
+        // boosts that day's photos to the top of the results) so matching
+        // has to look through far fewer candidates.
+        if let dateQuery = Self.dateFormatter.date(from: configuration.visitDate).map(Self.searchDateFormatter.string(from:)) {
+            do {
+                // The search icon is a TOGGLE (tap again closes it) -- unlike
+                // the idempotent buttons elsewhere, a blind double-tap here
+                // re-closes it (confirmed live). Single-tap, then verify it
+                // actually opened before proceeding, retrying only if it
+                // didn't.
+                var searchOpened = false
+                for _ in 0..<3 {
+                    try await clickDetectedTarget(CGPoint(x: 0.86, y: 0.94))
+                    try await pause(0.5)
+                    if try await findText("search your library", timeout: 2) != nil {
+                        searchOpened = true
+                        break
+                    }
+                }
+                guard searchOpened else {
+                    throw AutomationFailure.message("Could not open photo search.")
+                }
+                let searchField = try await waitForText("search your library", timeout: 5)
+                try await clickDetectedTarget(searchField.center)
+                try typeText(dateQuery)
+                if let suggestion = try await findText(dateQuery, timeout: 5, predicate: { $0.center.y < 0.9 }) {
+                    try await clickDetectedTarget(suggestion.center)
+                    try await pause(0.6)
+                }
+            } catch {
+                emit(
+                    type: "diagnostic",
+                    step: "add_photos",
+                    message: "Date search unavailable, falling back to scrolling: \(error.localizedDescription)"
+                )
             }
         }
-        guard collectionsIsOpen else {
-            throw AutomationFailure.message("The photo picker did not open Collections.")
-        }
-
-        var albumScrolls = 0
-        while album == nil && albumScrolls < 12 {
-            scrollDown()
-            try await pause(0.65)
-            album = try await findText("beli", timeout: 3) { item in
-                item.center.y > 0.15
-            }
-            albumScrolls += 1
-        }
-        guard let album else {
-            throw AutomationFailure.message("The Beli photo album could not be found.")
-        }
-        try await clickDetectedTarget(album.center)
-        _ = try await waitForText("beli", timeout: 20) { $0.center.y < 0.18 }
 
         let targets = configuration.photoPaths.compactMap(Self.loadImage)
         guard targets.count == configuration.photoPaths.count else {
@@ -324,9 +409,20 @@ private final class BeliAutomation {
         try saveSelectedPhotoOrder([])
         _ = try await selectPhotos(targets)
 
-        click(CGPoint(x: 0.938, y: 0.144))
+        click(CGPoint(x: 0.898, y: 0.124))
+        try await dismissPhotoAccessPromptIfPresent()
         _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
         finish("add_photos")
+    }
+
+    // Only appears for users whose Beli photo-access permission is set to
+    // "Limited" rather than full access -- iOS asks whether to keep the
+    // just-made selection or pick more. A no-op when full access is granted
+    // and this prompt never shows.
+    private func dismissPhotoAccessPromptIfPresent() async throws {
+        if let keepSelection = try? await findText("keep current selection", timeout: 3) {
+            try await clickDetectedTarget(keepSelection.center)
+        }
     }
 
     private func continueFromPhotoPicker() async throws {
@@ -334,7 +430,8 @@ private final class BeliAutomation {
             $0.center.y < 0.2
         }
         if existingUpload == nil {
-            click(CGPoint(x: 0.938, y: 0.144))
+            click(CGPoint(x: 0.898, y: 0.124))
+            try await dismissPhotoAccessPromptIfPresent()
             _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
         }
     }
@@ -352,7 +449,7 @@ private final class BeliAutomation {
         }
         try await addPhotoDescriptions(descriptions)
         let save = try await waitForText("save", timeout: 35) { $0.center.y < 0.18 }
-        try await clickDetectedTarget(save.center)
+        try await clickThroughScreenshot(save.center)
         finish("add_photo_descriptions")
     }
 
@@ -439,17 +536,38 @@ private final class BeliAutomation {
                 normalize(item.text).contains("share this page") &&
                     item.center.y > 0.65
             }
-            if sharePageIsOpen {
+            // Landing back on the restaurant's own page ("Rank again" +
+            // a checkmark badge showing the new score) is also a valid
+            // completion signal -- confirmed live, "share this page" doesn't
+            // always show/get caught.
+            let rankAgainIsOpen = items.contains { item in
+                normalize(item.text).contains("rank again")
+            }
+            if sharePageIsOpen || rankAgainIsOpen {
                 emit(type: "celebrate", step: nil, message: nil)
                 try await pause(5)
-                try await clickDetectedTarget(CGPoint(x: 0.085, y: 0.15))
-                let feed = try await waitForText("feed", timeout: 20) {
-                    $0.center.y > 0.8
+                if sharePageIsOpen {
+                    try await clickDetectedTarget(CGPoint(x: 0.085, y: 0.15))
+                    let feed = try await waitForText("feed", timeout: 20) {
+                        $0.center.y > 0.8
+                    }
+                    try await clickDetectedTarget(feed.center)
+                } else {
+                    let search = try await waitForText("search", timeout: 20) {
+                        $0.center.y > 0.8
+                    }
+                    try await clickDetectedTarget(search.center)
                 }
-                try await clickDetectedTarget(feed.center)
                 _ = try await waitForText("search a restaurant", timeout: 20)
                 finish("finish_in_beli")
                 return
+            }
+            // Duels ("Which do you prefer?") appear here, between tapping
+            // "Okay" and the share/rank-again page (confirmed live). A
+            // fast-mode miss just gets retried next iteration.
+            if normalize(items.map { $0.text }.joined(separator: " ")).contains("which do you prefer") {
+                try await resolveAnyPendingDuels()
+                continue
             }
             try await pause(0.8)
         }
@@ -478,7 +596,7 @@ private final class BeliAutomation {
         var page = 0
         var selectedOrder: [Int] = []
 
-        while !remaining.isEmpty && page < 80 {
+        while !remaining.isEmpty && page < 10 {
             let image = try await capture.image()
             savePhotoDebugImage(image)
             let cells = Self.gridCells(in: image)
@@ -502,8 +620,12 @@ private final class BeliAutomation {
                 message: "photo page \(page): \(cells.count) cells, best distance \(bestDistance)"
             )
 
+            // 0.24 was tuned for the old grid-cell cropping; with the new
+            // fixed-column cropping the observed best distances for genuine
+            // matches sit around 0.24-0.35 (confirmed live), so 0.24 was
+            // rejecting real matches outright.
             if let candidate = candidates.first(where: { candidate in
-                guard candidate.distance < 0.24 else { return false }
+                guard candidate.distance < 0.36 else { return false }
                 let secondBest = candidates.first {
                     $0.target == candidate.target && $0.cell != candidate.cell
                 }?.distance ?? .greatestFiniteMagnitude
@@ -624,10 +746,20 @@ private final class BeliAutomation {
         let rows: [Int]
     }
 
+    // The system photo picker lays thumbnails out edge-to-edge in a fixed
+    // 3-column grid with no visible border/gap between cells (confirmed
+    // live) -- there is no dark separator line to hunt for, so this
+    // computes cell boundaries directly from a fixed column count and
+    // square cell size, only detecting where the grid *starts* vertically
+    // (skipping past any permission-banner/header UI above it) by finding
+    // the first row with enough color variance to be real photo content
+    // rather than mostly-white banner/text background.
     private static func photoGridSeparators(in image: CGImage) -> GridSeparators? {
         guard let pixels = Self.rgbaPixels(image) else { return nil }
         let width = image.width
         let height = image.height
+        let columnCount = 3
+        let cellSize = width / columnCount
 
         func luminance(x: Int, y: Int) -> Double {
             let offset = (y * width + x) * 4
@@ -637,112 +769,48 @@ private final class BeliAutomation {
             return (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255
         }
 
-        func columnLuminance(_ x: Int) -> Double {
-            let start = Int(Double(height) * 0.1)
-            let end = Int(Double(height) * 0.82)
-            var total = 0.0
-            var count = 0
-            for y in stride(from: start, to: end, by: 3) {
-                total += luminance(x: x, y: y)
-                count += 1
+        func rowVariance(_ y: Int) -> Double {
+            var minLuminance = 1.0
+            var maxLuminance = 0.0
+            for x in stride(from: 0, to: width, by: 4) {
+                let value = luminance(x: x, y: y)
+                minLuminance = min(minLuminance, value)
+                maxLuminance = max(maxLuminance, value)
             }
-            return count == 0 ? 1 : total / Double(count)
+            return maxLuminance - minLuminance
         }
 
-        func darkestColumn(near center: Int) -> (position: Int, luminance: Double) {
-            let radius = max(8, width / 16)
-            let range = max(0, center - radius)...min(width - 1, center + radius)
-            return range
-                .map { ($0, columnLuminance($0)) }
-                .min { $0.1 < $1.1 } ?? (center, 1)
-        }
-
-        let firstDivider = darkestColumn(near: width / 3)
-        let secondDivider = darkestColumn(near: width * 2 / 3)
-        let cellSize = secondDivider.position - firstDivider.position
-        guard firstDivider.luminance < 0.28,
-              secondDivider.luminance < 0.28,
-              cellSize > width / 4,
-              cellSize < width * 2 / 5 else {
-            return nil
-        }
-
-        let left = max(0, firstDivider.position - cellSize)
-        let right = min(width - 1, secondDivider.position + cellSize)
-
-        func rowLuminance(_ y: Int) -> Double {
-            var total = 0.0
-            var count = 0
-            for x in stride(from: left, through: right, by: 3) {
-                total += luminance(x: x, y: y)
-                count += 1
+        // Starts past 0.2 to avoid the colorful "Private Access to Photos"
+        // permission banner icon being mistaken for photo-grid content
+        // (confirmed live) -- costs at most one missed top row if that
+        // banner isn't showing, which is a safe tradeoff.
+        let searchStart = Int(Double(height) * 0.32)
+        let searchEnd = Int(Double(height) * 0.7)
+        var gridTop: Int?
+        var y = searchStart
+        while y < searchEnd {
+            if rowVariance(y) > 0.35 {
+                gridTop = y
+                break
             }
-            return count == 0 ? 1 : total / Double(count)
+            y += 4
         }
+        guard let gridTop else { return nil }
 
-        let searchRadius = max(5, cellSize / 32)
-        func darkestRow(near center: Int) -> (position: Int, luminance: Double, contrast: Double) {
-            let range = max(0, center - searchRadius)...min(height - 1, center + searchRadius)
-            let outside = max(12, cellSize / 12)
-            var best = (position: center, luminance: 1.0, contrast: 0.0)
-            var bestScore = -Double.infinity
-            for y in range {
-                let value = rowLuminance(y)
-                let before = rowLuminance(max(0, y - outside))
-                let after = rowLuminance(min(height - 1, y + outside))
-                let contrast = (before + after) / 2 - value
-                let leadingEdge = max(0, before - value)
-                let score = contrast + leadingEdge * 0.75 - value * 0.15
-                if score > bestScore {
-                    best = (y, value, contrast)
-                    bestScore = score
-                }
-            }
-            return best
+        var rows: [Int] = [gridTop]
+        var nextRow = gridTop + cellSize
+        while nextRow < height {
+            rows.append(nextRow)
+            nextRow += cellSize
         }
-
-        let minimumY = Int(Double(height) * 0.04)
-        let maximumY = Int(Double(height) * 0.93)
-        var bestPhase: (phase: Int, hits: Int, darkness: Double)?
-
-        for phase in 0..<cellSize {
-            var predicted = phase
-            while predicted < minimumY { predicted += cellSize }
-            var hits = 0
-            var darkness = 0.0
-            while predicted <= maximumY {
-                let row = darkestRow(near: predicted)
-                if row.luminance < 0.32, row.contrast > 0.055 {
-                    hits += 1
-                    darkness += row.luminance
-                }
-                predicted += cellSize
-            }
-            if bestPhase == nil || hits > bestPhase!.hits ||
-                (hits == bestPhase!.hits && darkness < bestPhase!.darkness) {
-                bestPhase = (phase, hits, darkness)
-            }
-        }
-
-        guard let bestPhase, bestPhase.hits >= 2 else { return nil }
-        var rows: [Int] = []
-        var predicted = bestPhase.phase
-        while predicted < minimumY { predicted += cellSize }
-        while predicted <= maximumY {
-            let row = darkestRow(near: predicted)
-            if row.luminance < 0.32,
-               row.contrast > 0.055,
-               rows.last.map({ abs($0 - row.position) > cellSize / 2 }) ?? true {
-                rows.append(row.position)
-            }
-            predicted += cellSize
-        }
-
         guard rows.count >= 2 else { return nil }
-        return GridSeparators(
-            columns: [left, firstDivider.position, secondDivider.position, right],
-            rows: rows
-        )
+
+        var columns: [Int] = []
+        for index in 0...columnCount {
+            columns.append(min(width - 1, index * cellSize))
+        }
+
+        return GridSeparators(columns: columns, rows: rows)
     }
 
     private func waitForDay(
@@ -1259,6 +1327,16 @@ private final class BeliAutomation {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
+    // Matches the system photo picker's natural-language date search, e.g.
+    // "August 9, 2026" (confirmed live).
+    private static let searchDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "MMMM d, yyyy"
+        return formatter
+    }()
 }
 
 // Groups OCR items from a Beli "My Lists" screen into (name, score) rows.
@@ -1269,6 +1347,14 @@ private final class BeliAutomation {
 // -- calibrated against a real screenshot via `--ratings-debug`).
 // A restaurant whose score is locked (Beli hides it until 10+ ratings in that
 // category) has no nearby numeric item and is skipped rather than guessed at.
+//
+// (Tried also capturing the city line, keyed as "name (city)", to disambiguate
+// chain restaurants with multiple rated locations -- reverted: the city is
+// the 2nd line below the title only when every expected line is present, and
+// on the last card of a screen with no next title to bound it, unrelated UI
+// text like "View Map"/"Search" bled in instead. Turned out unnecessary
+// anyway -- Beli's duel/comparison screen shows the opponent's score
+// directly, so duel-matching doesn't need to look up this dictionary at all.)
 private func groupRatingsRows(_ items: [OCRItem]) -> [(name: String, score: Double)] {
     let titlePrefix = "^\\d{1,3}\\.\\s+"
     let scoreRowTolerance = 0.015
@@ -1299,6 +1385,47 @@ private func normalizeRatingName(_ string: String) -> String {
         .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
         .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+// Extracts a trailing "<bullet> <score>" from a duel card's city line, e.g.
+// "New York, NY • 4.7" -> 4.7. Beli's own bullet character OCRs
+// inconsistently, so this matches any short separator before the number.
+private func extractTrailingScore(from text: String) -> Double? {
+    guard let regex = try? NSRegularExpression(pattern: "\\S\\s*(\\d{1,2}\\.\\d{1,2})\\s*$"),
+          let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+          let captureRange = Range(match.range(at: 1), in: text)
+    else { return nil }
+    return Double(text[captureRange])
+}
+
+// Detects a Beli "Which do you prefer?" duel screen and identifies the
+// opponent (whichever "City, ST" line has a trailing score) and its side.
+// Outer optional: no duel screen present at all. Inner opponentScore
+// optional: a duel is showing but the opponent's score couldn't be read
+// (e.g. OCR noise) -- the caller falls back to Beli's own "Too tough" button
+// rather than guessing. Free function (not a BeliAutomation method) so it
+// can be calibrated against a saved screenshot via `--duel-debug`.
+private func parseDuelScreen(
+    _ items: [OCRItem]
+) -> (opponentScore: Double?, opponentOnRight: Bool, opponentLineY: Double)? {
+    guard items.contains(where: {
+        normalizeRatingName($0.text).contains(normalizeRatingName("which do you prefer"))
+    }) else {
+        return nil
+    }
+
+    let cityLines = items.filter {
+        $0.text.range(of: ",\\s*[A-Z]{2}\\b", options: .regularExpression) != nil
+    }
+    guard let opponentLine = cityLines.first(where: { extractTrailingScore(from: $0.text) != nil }) else {
+        return (opponentScore: nil, opponentOnRight: false, opponentLineY: 0.5)
+    }
+
+    return (
+        opponentScore: extractTrailingScore(from: opponentLine.text),
+        opponentOnRight: opponentLine.center.x > 0.5,
+        opponentLineY: Double(opponentLine.center.y)
+    )
 }
 
 // A ScreenCaptureKit STREAM (continuous capture), unlike PhoneScreenshot's
@@ -1725,6 +1852,38 @@ private struct Main {
                 try runRatingsDebugFixture(path: CommandLine.arguments[2])
                 return
             }
+            if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--duel-debug" {
+                guard let image = BeliAutomation.loadFixtureImage(CommandLine.arguments[2]) else {
+                    throw AutomationFailure.message("The fixture image could not be read.")
+                }
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = true
+                request.minimumTextHeight = 0.006
+                try VNImageRequestHandler(cgImage: image).perform([request])
+                let items = (request.results ?? []).compactMap { observation -> OCRItem? in
+                    guard let candidate = observation.topCandidates(1).first else { return nil }
+                    let box = observation.boundingBox
+                    return OCRItem(
+                        text: candidate.string,
+                        confidence: candidate.confidence,
+                        x: box.minX,
+                        y: 1 - box.maxY,
+                        width: box.width,
+                        height: box.height
+                    )
+                }
+                guard let duel = parseDuelScreen(items) else {
+                    print("no duel screen detected")
+                    return
+                }
+                if let score = duel.opponentScore {
+                    print("duel detected: opponent score \(score), on \(duel.opponentOnRight ? "right" : "left") side, y=\(duel.opponentLineY)")
+                } else {
+                    print("duel detected, but could not read opponent score")
+                }
+                return
+            }
             if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--scroll-debug" {
                 try requireAutomationPermissions()
                 let capture = try await StreamingPhoneScreenshot.start()
@@ -1794,6 +1953,21 @@ private struct Main {
                 }
                 return
             }
+            if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--tap-debug",
+               let x = Double(CommandLine.arguments[2]), let y = Double(CommandLine.arguments[3]) {
+                try requireAutomationPermissions()
+                let capture = try await PhoneScreenshot()
+                let frame = capture.window.frame
+                let point = CGPoint(x: frame.minX + x * frame.width, y: frame.minY + y * frame.height)
+                print("Warping cursor to fraction (\(x), \(y)) -> global point \(point.x), \(point.y) in 2s...")
+                fflush(stdout)
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                CGWarpMouseCursorPosition(point)
+                print("Cursor warped -- look at the phone screen now. Not clicking.")
+                fflush(stdout)
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                return
+            }
             if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--export-ratings" {
                 try requireAutomationPermissions()
                 await exportRatings(to: CommandLine.arguments[2])
@@ -1853,6 +2027,7 @@ private struct Main {
                 startStep: startStep
             )
             try await automation.run()
+            await automation.cleanup()
         } catch {
             let message = error.localizedDescription
             var payload = [

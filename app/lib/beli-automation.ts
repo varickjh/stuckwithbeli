@@ -196,6 +196,8 @@ function launchSession(
                 console.info(
                     `[beli-automation:${session.id}] ${event.message ?? ""}`,
                 );
+            } else if (event.type === "duel" && event.message) {
+                current.duelLog.push({ message: event.message });
             }
         });
     }
@@ -285,6 +287,7 @@ export async function startBeliAutomation(input: StartAutomationInput) {
         steps: freshSteps("open_beli"),
         error: null,
         recovery: null,
+        duelLog: [],
         binary,
         configPath,
         workDirectory,
@@ -433,6 +436,7 @@ export function getBeliAutomationStatus(sessionId: string) {
         steps: session.steps,
         error: session.error,
         recovery: session.recovery,
+        duelLog: session.duelLog,
     };
     return structuredClone(status);
 }
