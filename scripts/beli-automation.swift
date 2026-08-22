@@ -166,15 +166,39 @@ private final class BeliAutomation {
 
         let currentLocation = try await waitForText("current location", timeout: 20)
         let prefix = String(configuration.restaurantName.prefix(10))
-        let result = try await waitForText(prefix, timeout: 45) { item in
+        let resultPredicate: (OCRItem) -> Bool = { item in
             item.center.y > currentLocation.center.y + 0.025
         }
+        let result = try await waitForText(prefix, timeout: 45, predicate: resultPredicate)
+        emit(
+            type: "diagnostic",
+            step: "find_restaurant",
+            message: "search result \"\(result.text)\" found at \(result.center), tapping"
+        )
         // Tap the restaurant NAME (not the row's own "+"/bookmark icons,
         // which are a different action -- confirmed live) to open its
         // profile page, where start_rating finds the teal rating button.
         // A single tap silently failed to register here too (same class of
-        // issue found elsewhere in this flow) -- double-tap instead.
-        try await clickThroughScreenshot(result.center)
+        // issue found elsewhere in this flow) -- double-tap instead. But
+        // results can still be settling/reflowing (network-fetched
+        // autocomplete) when the first read finds them, so this re-locates
+        // the row right before the second tap instead of reusing a
+        // position that may have already scrolled away underneath it.
+        try await pause(0.25)
+        click(result.center)
+        try await pause(1)
+        if let resettled = try await findText(prefix, timeout: 2, predicate: resultPredicate) {
+            if distance(resettled.center, result.center) > 0.02 {
+                emit(
+                    type: "diagnostic",
+                    step: "find_restaurant",
+                    message: "search result moved to \(resettled.center) before second tap, retargeting"
+                )
+            }
+            click(resettled.center)
+        } else {
+            click(result.center)
+        }
         try await pause(1.5)
         finish("find_restaurant")
     }
@@ -257,25 +281,10 @@ private final class BeliAutomation {
     }
 
     private func choosingCategory() async throws {
+        // Skipped: Beli already defaults to the right category, and
+        // changing it isn't needed, so this no longer touches the UI at
+        // all -- avoids the category picker's flaky OCR/timing entirely.
         start("choose_category")
-        let categoryRow = try await waitForText("add to my list of", timeout: 20)
-        try await clickDetectedTarget(
-            CGPoint(x: 0.57, y: categoryRow.center.y)
-        )
-        let title = try await waitForText("choose a category", timeout: 20)
-        let categoryLabel: String
-        switch configuration.category {
-        case "Restaurant": categoryLabel = "restaurants"
-        case "Bar": categoryLabel = "bars"
-        case "Coffee/Tea": categoryLabel = "coffee & tea"
-        case "Bakery": categoryLabel = "bakeries"
-        case "Dessert/Ice Cream": categoryLabel = "ice cream & dessert"
-        default: categoryLabel = "restaurants"
-        }
-        let category = try await waitForText(categoryLabel, timeout: 15) {
-            $0.center.y > title.center.y
-        }
-        try await clickDetectedTarget(category.center)
         finish("choose_category")
     }
 
@@ -325,28 +334,30 @@ private final class BeliAutomation {
         let addDate = try await waitForText("add visit date", timeout: 20)
         try await clickDetectedTarget(addDate.center)
 
-        var visibleMonth = try await readVisibleMonth(timeout: 20)
         let calendar = Calendar(identifier: .gregorian)
         let targetComponents = calendar.dateComponents([.year, .month], from: targetDate)
-        var movements = 0
+        guard let targetYear = targetComponents.year, let targetMonth = targetComponents.month else {
+            throw AutomationFailure.message("The visit date is invalid.")
+        }
 
-        while visibleMonth.year != targetComponents.year || visibleMonth.month != targetComponents.month {
-            guard movements < 120 else {
-                throw AutomationFailure.message("The visit month is too far from the displayed calendar.")
-            }
-            let currentIndex = visibleMonth.year * 12 + visibleMonth.month
-            let targetIndex = (targetComponents.year ?? 0) * 12 + (targetComponents.month ?? 0)
-            let goForward = targetIndex > currentIndex
-            try await clickDetectedTarget(
-                CGPoint(x: goForward ? 0.938 : 0.887, y: visibleMonth.y)
+        var visibleMonth = try await readVisibleMonth(timeout: 20)
+
+        if visibleMonth.year != targetYear || visibleMonth.month != targetMonth {
+            try await selectMonthYear(targetMonth: targetMonth, targetYear: targetYear, visibleMonth: visibleMonth)
+            visibleMonth = try await readVisibleMonth(timeout: 20)
+            emit(
+                type: "diagnostic",
+                step: "set_visit_date",
+                message: "month confirmation: read \(visibleMonth.month)/\(visibleMonth.year), "
+                    + "target \(targetMonth)/\(targetYear)"
             )
-            try await pause(0.45)
-            visibleMonth = try await readVisibleMonth(timeout: 8)
-            movements += 1
+            guard visibleMonth.year == targetYear, visibleMonth.month == targetMonth else {
+                throw AutomationFailure.message("The visit month could not be set.")
+            }
         }
 
         let day = calendar.component(.day, from: targetDate)
-        let dayItem = try await waitForDay(day, date: targetDate, monthHeaderY: visibleMonth.y)
+        let dayItem = try await waitForDay(day, date: targetDate)
         try await clickDetectedTarget(dayItem.center)
         let done = try await waitForText("done", timeout: 15) { $0.center.y < 0.18 }
         try await clickDetectedTarget(done.center)
@@ -389,9 +400,26 @@ private final class BeliAutomation {
                 let searchField = try await waitForText("search your library", timeout: 5)
                 try await clickDetectedTarget(searchField.center)
                 try typeText(dateQuery)
-                if let suggestion = try await findText(dateQuery, timeout: 5, predicate: { $0.center.y < 0.9 }) {
+                // The date suggestion chip can take a moment to populate
+                // after typing finishes (Photos indexes it locally), so
+                // this waits for it rather than doing one quick look and
+                // silently moving on -- without tapping it, the search
+                // never actually boosts that day's photos, and previously
+                // that failure was invisible.
+                if let suggestion = try await findText(dateQuery, timeout: 8, predicate: { $0.center.y < 0.9 }) {
                     try await clickDetectedTarget(suggestion.center)
                     try await pause(0.6)
+                    emit(
+                        type: "diagnostic",
+                        step: "add_photos",
+                        message: "date search: tapped suggestion \"\(suggestion.text)\""
+                    )
+                } else {
+                    emit(
+                        type: "diagnostic",
+                        step: "add_photos",
+                        message: "date search: no suggestion chip appeared for \"\(dateQuery)\", continuing without it"
+                    )
                 }
             } catch {
                 emit(
@@ -409,7 +437,20 @@ private final class BeliAutomation {
         try saveSelectedPhotoOrder([])
         _ = try await selectPhotos(targets)
 
-        click(CGPoint(x: 0.898, y: 0.124))
+        // A blind click at a hardcoded absolute fraction landed on iPhone
+        // Mirroring's own "Home" control instead of the picker's checkmark
+        // (confirmed live: sent the phone to its home screen mid-run) --
+        // anchoring to the "Photos" tab, which sits on the exact same row
+        // as the checkmark in every capture tonight, keeps the click
+        // targeted at the picker's own chrome even if its exact position
+        // shifts.
+        let photosTab = try await waitForText("photos", timeout: 10) { $0.center.y < 0.25 }
+        emit(
+            type: "diagnostic",
+            step: "add_photos",
+            message: "confirming photo selection: \"Photos\" tab at \(photosTab.center), tapping checkmark"
+        )
+        click(CGPoint(x: 0.9, y: photosTab.center.y))
         try await dismissPhotoAccessPromptIfPresent()
         _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
         finish("add_photos")
@@ -430,7 +471,8 @@ private final class BeliAutomation {
             $0.center.y < 0.2
         }
         if existingUpload == nil {
-            click(CGPoint(x: 0.898, y: 0.124))
+            let photosTab = try await waitForText("photos", timeout: 10) { $0.center.y < 0.25 }
+            click(CGPoint(x: 0.9, y: photosTab.center.y))
             try await dismissPhotoAccessPromptIfPresent()
             _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
         }
@@ -588,7 +630,7 @@ private final class BeliAutomation {
 
     private func selectPhotos(_ targetImages: [CGImage]) async throws -> [Int] {
         let targetSignatures = try targetImages.map {
-            try Self.pixelSignature(Self.centerSquare($0))
+            try Self.featurePrint(Self.centerSquare($0))
         }
         var remaining = Set(targetSignatures.indices)
         var previousGridFeature: [Float]?
@@ -596,16 +638,28 @@ private final class BeliAutomation {
         var page = 0
         var selectedOrder: [Int] = []
 
+        // A photo can already be checked from an earlier attempt (the
+        // system picker keeps its selection state across re-presenting in
+        // the same session), which would otherwise stay selected alongside
+        // whatever this run correctly matches. This runs exactly once,
+        // before any of this run's own matching/clicking, and confirms
+        // each deselect actually took effect before moving on -- a prior
+        // version of this ran on every scroll page (including pages this
+        // run had just selected on) and could misjudge a not-yet-settled
+        // click as still-checked, toggling it back on and oscillating.
+        // Running once, up front, with a confirm-or-stop loop avoids both.
+        try await clearStaleSelections()
+
         while !remaining.isEmpty && page < 10 {
             let image = try await capture.image()
             savePhotoDebugImage(image)
             let cells = Self.gridCells(in: image)
-            let cellSignatures = try cells.map { try Self.pixelSignature($0.image) }
+            let cellSignatures = try cells.map { try Self.featurePrint($0.image) }
             var candidates: [(target: Int, cell: Int, distance: Float)] = []
 
             for targetIndex in remaining {
                 for (cellIndex, cellSignature) in cellSignatures.enumerated() {
-                    let distance = Self.pixelSignatureDistance(
+                    let distance = try Self.featurePrintDistance(
                         targetSignatures[targetIndex],
                         cellSignature
                     )
@@ -614,23 +668,26 @@ private final class BeliAutomation {
             }
             candidates.sort { $0.distance < $1.distance }
             let bestDistance = candidates.first.map { String(format: "%.3f", $0.distance) } ?? "none"
+            let secondBestForBest = candidates.first.flatMap { best in
+                candidates.first { $0.target == best.target && $0.cell != best.cell }
+            }
+            let secondBestDistance = secondBestForBest.map { String(format: "%.3f", $0.distance) } ?? "none"
+            let bestCell = candidates.first.map(\.cell).map(String.init) ?? "none"
             emit(
                 type: "diagnostic",
                 step: "add_photos",
-                message: "photo page \(page): \(cells.count) cells, best distance \(bestDistance)"
+                message: "photo page \(page): \(cells.count) cells, best distance \(bestDistance) (cell \(bestCell)), second-best \(secondBestDistance)"
             )
 
-            // 0.24 was tuned for the old grid-cell cropping; with the new
-            // fixed-column cropping the observed best distances for genuine
-            // matches sit around 0.24-0.35 (confirmed live), so 0.24 was
-            // rejecting real matches outright.
-            if let candidate = candidates.first(where: { candidate in
-                guard candidate.distance < 0.36 else { return false }
-                let secondBest = candidates.first {
-                    $0.target == candidate.target && $0.cell != candidate.cell
-                }?.distance ?? .greatestFiniteMagnitude
-                return candidate.distance + 0.035 < secondBest || candidate.distance < 0.13
-            }) {
+            // Vision's feature-print distance separates real matches from
+            // near-misses far more cleanly than the old diff-hash did
+            // (confirmed live: genuine matches ~0.78, unrelated photos
+            // 1.16+), so a plain absolute cutoff is enough -- no need for
+            // the old hash's "must beat the runner-up by a margin" check,
+            // which actively broke on duplicate/near-duplicate photos (a
+            // photo saved twice makes its own best competitor its own
+            // near-identical duplicate, so it could never win by a margin).
+            if let candidate = candidates.first(where: { $0.distance < 0.95 }) {
                 try await clickDetectedTarget(cells[candidate.cell].point)
                 remaining.remove(candidate.target)
                 selectedOrder.append(candidate.target)
@@ -724,6 +781,118 @@ private final class BeliAutomation {
         return cells
     }
 
+    // The system photo picker badges an already-selected thumbnail with a
+    // solid blue checkmark circle in its bottom-right corner (confirmed
+    // live, color ~RGB(74,146,239)). Checked against every cell in real
+    // grid captures (oyster photos, travel screenshots, app screenshots,
+    // job postings, LinkedIn-style cards) with zero false positives at
+    // this threshold -- real photo content in that specific corner never
+    // came close to the badge's blue ratio.
+    // Color alone isn't enough: a photo can legitimately have a saturated
+    // blue region (sky, a screen's glow) sitting right in this corner,
+    // which a plain color-ratio check can't tell apart from the badge
+    // (confirmed live against a blue-sky photo and a laptop-screen photo,
+    // both false-positived on color alone). The badge's actual shape is
+    // what's distinctive: a white ring around a blue fill, in that specific
+    // corner -- requiring both, checked separately, cleared every false
+    // positive found while still catching the real badge across two
+    // differently-themed picker captures with 27 varied cells tested.
+    private static func isCellSelected(_ cellImage: CGImage) -> Bool {
+        guard let pixels = rgbaPixels(cellImage) else { return false }
+        let width = cellImage.width
+        let height = cellImage.height
+
+        func pixel(_ x: Int, _ y: Int) -> (r: Int, g: Int, b: Int)? {
+            guard x >= 0, x < width, y >= 0, y < height else { return nil }
+            let offset = (y * width + x) * 4
+            return (Int(pixels[offset]), Int(pixels[offset + 1]), Int(pixels[offset + 2]))
+        }
+        func isWhite(_ p: (r: Int, g: Int, b: Int)) -> Bool {
+            p.r > 165 && p.g > 165 && p.b > 165 && max(p.r, p.g, p.b) - min(p.r, p.g, p.b) < 45
+        }
+        func isBlueFill(_ p: (r: Int, g: Int, b: Int)) -> Bool {
+            p.b > p.r + 60 && p.b > p.g + 30 && p.b > 140
+        }
+
+        let cx = Double(width) * 0.905
+        let cy = Double(height) * 0.72
+        let angleSamples = 24
+        let radialSamples = 5
+        let ringLow = Double(width) * 0.040
+        let ringHigh = Double(width) * 0.065
+        let fillRadius = Double(width) * 0.030
+
+        var whiteRingHits = 0
+        var blueFillHits = 0
+        for i in 0..<angleSamples {
+            let angle = 2 * Double.pi * Double(i) / Double(angleSamples)
+
+            var ringHit = false
+            for j in 0..<radialSamples {
+                let radius = ringLow + (ringHigh - ringLow) * Double(j) / Double(radialSamples - 1)
+                let x = Int(cx + cos(angle) * radius)
+                let y = Int(cy + sin(angle) * radius)
+                if let p = pixel(x, y), isWhite(p) {
+                    ringHit = true
+                    break
+                }
+            }
+            if ringHit { whiteRingHits += 1 }
+
+            let fillX = Int(cx + cos(angle) * fillRadius)
+            let fillY = Int(cy + sin(angle) * fillRadius)
+            if let p = pixel(fillX, fillY), isBlueFill(p) {
+                blueFillHits += 1
+            }
+        }
+
+        let whiteRatio = Double(whiteRingHits) / Double(angleSamples)
+        let blueRatio = Double(blueFillHits) / Double(angleSamples)
+        // ANDing two fixed per-metric thresholds left almost no margin: a
+        // real badge, recaptured, scored white=0.54 against a 0.55 cutoff
+        // and was missed by a hair (confirmed live) -- a combined score
+        // tolerates that capture-to-capture wobble in either metric while
+        // the individual floors still block a cell that only nails one
+        // metric (a sharp white/black edge scored white=1.00 blue=0.00 in
+        // testing; a saturated blue photo scored white=0.46 blue=0.46).
+        return whiteRatio + blueRatio > 1.2 && whiteRatio > 0.2 && blueRatio > 0.5
+    }
+
+    // Deselects any cell on the currently-visible page that's already
+    // checked, confirming each one actually cleared before moving to the
+    // next -- run once, before any of selectPhotos()'s own matching, so it
+    // can never mistake this run's own selection for stale leftover state.
+    private func clearStaleSelections() async throws {
+        let image = try await capture.image()
+        let cells = Self.gridCells(in: image)
+        let staleCells = cells.filter { Self.isCellSelected($0.image) }
+        guard !staleCells.isEmpty else { return }
+
+        for cell in staleCells {
+            try await clickDetectedTarget(cell.point)
+            var cleared = false
+            for _ in 0..<4 {
+                try await pause(0.5)
+                let recheck = try await capture.image()
+                let recheckCells = Self.gridCells(in: recheck)
+                guard let matching = recheckCells.first(where: {
+                    abs($0.point.x - cell.point.x) < 0.02 && abs($0.point.y - cell.point.y) < 0.02
+                }) else { continue }
+                if !Self.isCellSelected(matching.image) {
+                    cleared = true
+                    break
+                }
+            }
+            emit(
+                type: "diagnostic",
+                step: "add_photos",
+                message: cleared
+                    ? "cleared a stale photo selection before matching"
+                    : "found a stale photo selection but could not confirm it cleared, continuing anyway"
+            )
+        }
+    }
+
     private func savePhotoDebugImage(_ image: CGImage) {
         let debugDirectory = configuration.debugDirectory ?? configuration.photoPaths.first.map {
             URL(fileURLWithPath: $0).deletingLastPathComponent().path
@@ -769,10 +938,17 @@ private final class BeliAutomation {
             return (red * 0.2126 + green * 0.7152 + blue * 0.0722) / 255
         }
 
+        // Excludes the outer edges of the capture -- the iPhone Mirroring
+        // window's dark bezel sits just past the real screen content there,
+        // and sampling all the way to x=0/width picks up that bezel as a
+        // huge, content-independent "variance" spike that swamps whatever
+        // is actually on screen (confirmed live).
+        let xMargin = Int(Double(width) * 0.07)
+
         func rowVariance(_ y: Int) -> Double {
             var minLuminance = 1.0
             var maxLuminance = 0.0
-            for x in stride(from: 0, to: width, by: 4) {
+            for x in stride(from: xMargin, to: width - xMargin, by: 4) {
                 let value = luminance(x: x, y: y)
                 minLuminance = min(minLuminance, value)
                 maxLuminance = max(maxLuminance, value)
@@ -780,18 +956,37 @@ private final class BeliAutomation {
             return maxLuminance - minLuminance
         }
 
-        // Starts past 0.2 to avoid the colorful "Private Access to Photos"
-        // permission banner icon being mistaken for photo-grid content
-        // (confirmed live) -- costs at most one missed top row if that
-        // banner isn't showing, which is a safe tradeoff.
-        let searchStart = Int(Double(height) * 0.32)
+        // The photo picker's header varies in height: with the "Private
+        // Access to Photos" banner showing, real photo content starts much
+        // further down than it does once that banner is dismissed
+        // (confirmed live) -- a fixed search-start fraction only works for
+        // one of those two states. Instead this starts the search early
+        // (past the status bar) and requires the high-variance region to
+        // *sustain* for close to a full cell height before accepting it as
+        // the grid top, which is what actually distinguishes a real photo
+        // row from the "Photos/Collections" tab text or the banner's own
+        // icon+text (both brief, separated from real content by gaps).
+        let searchStart = Int(Double(height) * 0.08)
         let searchEnd = Int(Double(height) * 0.7)
+        let sustainSpan = Int(Double(cellSize) * 0.6)
         var gridTop: Int?
         var y = searchStart
         while y < searchEnd {
             if rowVariance(y) > 0.35 {
-                gridTop = y
-                break
+                var sustained = true
+                var checkY = y
+                let sustainEnd = y + sustainSpan
+                while checkY < sustainEnd {
+                    if rowVariance(checkY) <= 0.15 {
+                        sustained = false
+                        break
+                    }
+                    checkY += 8
+                }
+                if sustained {
+                    gridTop = y
+                    break
+                }
             }
             y += 4
         }
@@ -813,28 +1008,63 @@ private final class BeliAutomation {
         return GridSeparators(columns: columns, rows: rows)
     }
 
-    private func waitForDay(
-        _ day: Int,
-        date: Date,
-        monthHeaderY: Double
-    ) async throws -> OCRItem {
+    // Waits for the day-grid header ("<Month> <Year>") and parses it, used
+    // both to read the currently-displayed month and to locate the day
+    // grid below it.
+    private func monthYear(from text: String) -> (year: Int, month: Int)? {
+        let words = text
+            .replacingOccurrences(of: ",", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+        guard let monthWord = words.first,
+              let month = Self.months.firstIndex(where: {
+                  $0.caseInsensitiveCompare(String(monthWord)) == .orderedSame
+              }),
+              // Must check for digits, not just length 4 -- "July" and
+              // "June" are themselves 4 characters, so a length-only check
+              // matched the month name itself before ever reaching the
+              // actual year, silently failing to parse those two months.
+              let yearWord = words.first(where: { $0.count == 4 && $0.allSatisfy(\.isNumber) }),
+              let year = Int(yearWord) else { return nil }
+        return (year, month + 1)
+    }
+
+    private func waitForDay(_ day: Int, date: Date) async throws -> OCRItem {
         let calendar = Calendar(identifier: .gregorian)
         let weekday = calendar.component(.weekday, from: date) - 1
         let firstOfMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: date))!
         let firstWeekday = calendar.component(.weekday, from: firstOfMonth) - 1
         let row = (firstWeekday + day - 1) / 7
-        let expected = CGPoint(
-            x: 0.119 + Double(weekday) * 0.127,
-            y: monthHeaderY + 0.082 + Double(row) * 0.05
-        )
 
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline {
             let items = try recognizeText(in: await capture.image())
+            // Re-locate the month header on every poll instead of trusting
+            // a position captured before this call -- the day grid can
+            // still be settling into its final layout right after
+            // collapsing the month/year picker, so a stale header y would
+            // keep the day-number filter band wrong for the whole 15s wait.
+            guard let monthHeaderY = items.first(where: {
+                $0.center.y > 0.12 && $0.center.y < 0.34 && monthYear(from: $0.text) != nil
+            })?.center.y else {
+                try await pause(0.35)
+                continue
+            }
+
+            let expected = CGPoint(
+                x: 0.119 + Double(weekday) * 0.127,
+                y: monthHeaderY + 0.086 + Double(row) * 0.057
+            )
             let candidates = items.filter {
                 normalize($0.text) == String(day) &&
                     $0.center.y > monthHeaderY + 0.035 && $0.center.y < 0.72
             }
+            emit(
+                type: "diagnostic",
+                step: "set_visit_date",
+                message: "day search: header y=\(String(format: "%.3f", monthHeaderY)), "
+                    + "\(candidates.count) candidate(s) for day \(day), "
+                    + "expected \(String(format: "(%.3f, %.3f)", expected.x, expected.y))"
+            )
             if let closest = candidates.min(by: {
                 distance($0.center, expected) < distance($1.center, expected)
             }) {
@@ -845,25 +1075,211 @@ private final class BeliAutomation {
         throw AutomationFailure.message("The visit day could not be found in Beli's calendar.")
     }
 
-    private func readVisibleMonth(timeout: TimeInterval) async throws -> (year: Int, month: Int, y: Double) {
+    private func readVisibleMonth(
+        timeout: TimeInterval
+    ) async throws -> (year: Int, month: Int, x: Double, y: Double) {
         let deadline = Date().addingTimeInterval(timeout)
+        var lastDiagnostic = Date.distantPast
         while Date() < deadline {
             let items = try recognizeText(in: await capture.image())
             for item in items where item.center.y > 0.12 && item.center.y < 0.34 {
-                let words = item.text
-                    .replacingOccurrences(of: ",", with: " ")
-                    .split(whereSeparator: { $0.isWhitespace })
-                guard let monthWord = words.first,
-                      let month = Self.months.firstIndex(where: {
-                          $0.caseInsensitiveCompare(String(monthWord)) == .orderedSame
-                      }),
-                      let yearWord = words.first(where: { $0.count == 4 }),
-                      let year = Int(yearWord) else { continue }
-                return (year, month + 1, item.center.y)
+                guard let (year, month) = monthYear(from: item.text) else { continue }
+                // The "Add visit date" sheet can still be sliding into
+                // place when this first finds readable text -- a header
+                // caught mid-animation reports a transient y that isn't
+                // where it actually settles (confirmed live: opened the
+                // month/year wheel at y=0.33 instead of the correct 0.24,
+                // which then made every subsequent nudge target the wrong
+                // row entirely). Re-checking after a beat confirms the
+                // position has actually stopped moving before trusting it.
+                try await pause(0.3)
+                let settledItems = try recognizeText(in: await capture.image())
+                guard let settled = settledItems.first(where: {
+                    $0.center.y > 0.12 && $0.center.y < 0.34 && monthYear(from: $0.text) != nil
+                }), abs(settled.center.y - item.center.y) < 0.01 else {
+                    continue
+                }
+                return (year, month, settled.center.x, settled.center.y)
+            }
+            // If this keeps timing out, this shows what OCR actually saw
+            // near the top of the screen instead of leaving it a mystery.
+            if Date().timeIntervalSince(lastDiagnostic) > 3 {
+                lastDiagnostic = Date()
+                let nearby = items
+                    .filter { $0.center.y > 0.05 && $0.center.y < 0.4 }
+                    .map { "\"\($0.text)\"@\(String(format: "%.2f", $0.center.y))" }
+                    .joined(separator: ", ")
+                emit(
+                    type: "diagnostic",
+                    step: "set_visit_date",
+                    message: "month header not found; text near top: "
+                        + (nearby.isEmpty ? "(none)" : nearby)
+                )
             }
             try await pause(0.35)
         }
         throw AutomationFailure.message("Beli's visible calendar month could not be read.")
+    }
+
+    private struct WheelSelection {
+        let text: String
+        let point: CGPoint
+        let year: Int
+        let month: Int?
+    }
+
+    // The vertical offset from the "<Month> <Year> v" toggle down to the
+    // wheel picker's highlighted/selected row, and the spacing between
+    // rows, both estimated from a live screenshot of that picker. Kept
+    // generous on either side since this is an estimate, not a measurement
+    // of the running device.
+    private static let wheelSelectedRowOffset = 0.186
+    private static let wheelRowHeight = 0.037
+
+    private func readWheelSelection(headerY: Double, knownYear: Int) async throws -> WheelSelection? {
+        let items = try recognizeText(in: await capture.image())
+        let expectedY = headerY + Self.wheelSelectedRowOffset
+        let bandTop = expectedY - Self.wheelRowHeight * 2.5
+        let bandBottom = expectedY + Self.wheelRowHeight * 2.5
+
+        let candidates: [(item: OCRItem, month: Int?, year: Int?)] = items.compactMap { item in
+            guard item.center.y > bandTop, item.center.y < bandBottom else { return nil }
+            let text = item.text.trimmingCharacters(in: .whitespaces)
+            if text.count == 4, let year = Int(text) {
+                return (item, nil, year)
+            }
+            let words = text.split(whereSeparator: { $0.isWhitespace })
+            guard let first = words.first,
+                  let monthIndex = Self.months.firstIndex(where: {
+                      $0.caseInsensitiveCompare(String(first)) == .orderedSame
+                  }) else { return nil }
+            if words.count > 1, let year = Int(words[1]) {
+                return (item, monthIndex + 1, year)
+            }
+            return (item, monthIndex + 1, nil)
+        }
+
+        guard let closest = candidates.min(by: {
+            abs($0.item.center.y - expectedY) < abs($1.item.center.y - expectedY)
+        }) else { return nil }
+
+        return WheelSelection(
+            text: closest.item.text,
+            point: closest.item.center,
+            year: closest.year ?? knownYear,
+            month: closest.month
+        )
+    }
+
+    // Scrolls the "<Month> <Year> v" wheel picker to the target month/year.
+    // The picker isn't a single chronological axis: scrolling up steps
+    // through recent months of whatever year is currently selected, while
+    // scrolling down jumps to whole-year shortcuts further back (confirmed
+    // live) -- so which way to nudge depends on whether the year still
+    // needs to change, not on how far away the target date is.
+    private func selectMonthYear(
+        targetMonth: Int,
+        targetYear: Int,
+        visibleMonth: (year: Int, month: Int, x: Double, y: Double)
+    ) async throws {
+        // Diagnostic only -- logs exactly what this click targets without
+        // changing any click behavior, so if the wheel fails to open again
+        // there's a concrete coordinate/frame to check instead of a guess.
+        let openPoint = CGPoint(x: visibleMonth.x, y: visibleMonth.y)
+        let resolvedOpenPoint = globalPoint(openPoint)
+        emit(
+            type: "diagnostic",
+            step: "set_visit_date",
+            message: "opening month/year picker: normalized \(openPoint), "
+                + "screen \(resolvedOpenPoint), window frame \(capture.window.frame)"
+        )
+        try await clickDetectedTarget(openPoint)
+
+        let headerY = visibleMonth.y
+        var knownYear = visibleMonth.year
+        var attempts = 0
+        var lastNilDiagnostic = Date.distantPast
+
+        while true {
+            guard attempts < 80 else {
+                throw AutomationFailure.message("The visit month/year picker did not converge.")
+            }
+            attempts += 1
+
+            guard let selection = try await readWheelSelection(headerY: headerY, knownYear: knownYear) else {
+                if Date().timeIntervalSince(lastNilDiagnostic) > 3 {
+                    lastNilDiagnostic = Date()
+                    emit(
+                        type: "diagnostic",
+                        step: "set_visit_date",
+                        message: "visit date picker: no row detected near the selection band"
+                    )
+                }
+                try await pause(0.3)
+                continue
+            }
+            knownYear = selection.year
+
+            if selection.month == targetMonth, selection.year == targetYear {
+                // The wheel has scroll/snap momentum -- a capture taken
+                // right after a nudge can catch the target row sliding
+                // transiently through the selection band before the wheel
+                // has actually settled there (confirmed live: closed on a
+                // match that the collapsed grid then showed as unset,
+                // because the wheel had drifted back off it by the time
+                // the close tap landed). Re-checking after settling
+                // catches that instead of trusting a single frame.
+                try await pause(0.5)
+                guard let settled = try await readWheelSelection(headerY: headerY, knownYear: knownYear),
+                      settled.month == targetMonth, settled.year == targetYear else {
+                    emit(
+                        type: "diagnostic",
+                        step: "set_visit_date",
+                        message: "visit date picker: \"\(selection.text)\" match didn't hold after settling, retrying"
+                    )
+                    continue
+                }
+                emit(
+                    type: "diagnostic",
+                    step: "set_visit_date",
+                    message: "visit date picker: matched \"\(settled.text)\" "
+                        + "(parsed as \(settled.month.map(String.init) ?? "nil")/\(settled.year)), closing"
+                )
+                break
+            }
+
+            let down = selection.year != targetYear
+            emit(
+                type: "diagnostic",
+                step: "set_visit_date",
+                message: "visit date picker: read \"\(selection.text)\", nudging \(down ? "down" : "up")"
+            )
+            nudgeWheel(at: selection.point, down: down)
+            try await pause(0.5)
+        }
+
+        try await clickDetectedTarget(CGPoint(x: visibleMonth.x, y: headerY))
+    }
+
+    private func nudgeWheel(at normalizedPoint: CGPoint, down: Bool) {
+        activatePhoneWindow()
+        let point = globalPoint(normalizedPoint)
+        CGWarpMouseCursorPosition(point)
+        CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )?.post(tap: .cghidEventTap)
+        usleep(40_000)
+        CGEvent(
+            scrollWheelEvent2Source: eventSource,
+            units: .pixel,
+            wheelCount: 1,
+            wheel1: down ? -50 : 50,
+            wheel2: 0,
+            wheel3: 0
+        )?.post(tap: .cghidEventTap)
     }
 
     private func waitForText(
@@ -1114,8 +1530,8 @@ private final class BeliAutomation {
 
         guard let best, best.score >= 8 else { return nil }
         return CGPoint(
-            x: Double(best.x) / Double(width),
-            y: Double(best.y) / Double(height)
+            x: Double(best.x) / Double(width) + 0.03,
+            y: Double(best.y) / Double(height) + 0.04
         )
     }
 
@@ -1178,78 +1594,27 @@ private final class BeliAutomation {
         return image.cropping(to: cropRect) ?? image
     }
 
-    private struct PixelSignature {
-        let differenceHash: [UInt64]
-        let colors: [UInt8]
-    }
-
-    private static func pixelSignature(_ image: CGImage) throws -> PixelSignature {
-        let width = 17
-        let height = 16
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
+    // Vision's built-in perceptual-similarity embedding. Unlike a hand-rolled
+    // pixel/color hash, this is trained to recognize the same photo across
+    // the compression and cropping differences between our saved copy and
+    // iOS's own picker thumbnail, so genuine matches and near-misses land
+    // much further apart than the old hash's ~0.34-0.37 near-miss band.
+    private static func featurePrint(_ image: CGImage) throws -> VNFeaturePrintObservation {
+        let request = VNGenerateImageFeaturePrintRequest()
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        guard let result = request.results?.first as? VNFeaturePrintObservation else {
             throw AutomationFailure.message("A photo could not be analyzed.")
         }
-        context.interpolationQuality = .high
-        context.draw(
-            centerSquare(image),
-            in: CGRect(x: 0, y: 0, width: width, height: height)
-        )
-
-        var hash = [UInt64](repeating: 0, count: 4)
-        var colors: [UInt8] = []
-        colors.reserveCapacity(8 * 8 * 3)
-        for y in 0..<height {
-            for x in 0..<(width - 1) {
-                let first = (y * width + x) * 4
-                let second = first + 4
-                let firstLuminance = Int(pixels[first]) * 54 +
-                    Int(pixels[first + 1]) * 183 +
-                    Int(pixels[first + 2]) * 19
-                let secondLuminance = Int(pixels[second]) * 54 +
-                    Int(pixels[second + 1]) * 183 +
-                    Int(pixels[second + 2]) * 19
-                let bit = y * (width - 1) + x
-                if firstLuminance < secondLuminance {
-                    hash[bit / 64] |= UInt64(1) << UInt64(bit % 64)
-                }
-            }
-        }
-
-        for y in stride(from: 1, to: height, by: 2) {
-            for x in stride(from: 1, to: width - 1, by: 2) {
-                let offset = (y * width + x) * 4
-                colors.append(pixels[offset])
-                colors.append(pixels[offset + 1])
-                colors.append(pixels[offset + 2])
-            }
-        }
-        return PixelSignature(differenceHash: hash, colors: colors)
+        return result
     }
 
-    private static func pixelSignatureDistance(
-        _ first: PixelSignature,
-        _ second: PixelSignature
-    ) -> Float {
-        let differentBits = zip(first.differenceHash, second.differenceHash)
-            .reduce(0) { total, pair in
-                total + (pair.0 ^ pair.1).nonzeroBitCount
-            }
-        let hashDistance = Float(differentBits) / 256
-        let colorDifference = zip(first.colors, second.colors).reduce(0) { total, pair in
-            total + abs(Int(pair.0) - Int(pair.1))
-        }
-        let colorDistance = Float(colorDifference) /
-            Float(max(1, first.colors.count * 255))
-        return hashDistance * 0.7 + colorDistance * 0.3
+    private static func featurePrintDistance(
+        _ first: VNFeaturePrintObservation,
+        _ second: VNFeaturePrintObservation
+    ) throws -> Float {
+        var distance: Float = 0
+        try first.computeDistance(&distance, to: second)
+        return distance
     }
 
     private func imageFeature(_ image: CGImage) -> [Float] {
@@ -1828,10 +2193,10 @@ private extension BeliAutomation {
     }
 
     static func matchFixtureDescription(screen: CGImage, target: CGImage) throws -> String {
-        let targetSignature = try pixelSignature(centerSquare(target))
+        let targetSignature = try featurePrint(centerSquare(target))
         let distances = try gridCells(in: screen).enumerated().map { index, cell in
-            let cellSignature = try pixelSignature(cell.image)
-            let distance = pixelSignatureDistance(targetSignature, cellSignature)
+            let cellSignature = try featurePrint(cell.image)
+            let distance = try featurePrintDistance(targetSignature, cellSignature)
             return (index, distance)
         }.sorted { $0.1 < $1.1 }
         return distances.prefix(5).map {
