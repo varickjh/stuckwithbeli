@@ -15,7 +15,7 @@ const openSans = Open_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "Auto Beli",
+  title: "Beli",
   description: "Organize food photos into location and time-based clusters.",
 };
 

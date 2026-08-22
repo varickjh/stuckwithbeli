@@ -57,7 +57,9 @@ function buildPrompt(
     "You are scoring a restaurant visit on Beli's 0.0-10.0 rating scale (higher is better, one decimal place).",
     `Restaurant: ${restaurantName}`,
     `Overall tier the user selected: "${ratingLabel(rating)}".`,
-    `The user's review (${review.source}): ${review.text}`,
+    review.text.trim()
+      ? `The user's review (${review.source}): ${review.text}`
+      : "The user did not write a review this time -- base the score on the selected tier and the calibration list only.",
     calibration.entries.length
       ? [
           "Here are the user's existing Beli scores, sorted highest to lowest, for calibration.",

@@ -77,9 +77,9 @@ function extractTranscript(event: unknown): string {
 }
 
 const ratings = [
-    { value: "liked", label: "I liked it!", color: "bg-[#74b894]" },
-    { value: "fine", label: "It was fine", color: "bg-[#f6dda0]" },
-    { value: "disliked", label: "I didn’t like it", color: "bg-[#efafb1]" },
+    { value: "liked", label: "I liked it!", color: "bg-[#78b090]" },
+    { value: "fine", label: "It was fine", color: "bg-[#f5e2ac]" },
+    { value: "disliked", label: "I didn’t like it", color: "bg-[#e8b6b6]" },
 ] as const;
 
 const confetti = Array.from({ length: 42 }, (_, index) => ({
@@ -87,7 +87,7 @@ const confetti = Array.from({ length: 42 }, (_, index) => ({
     left: `${(index * 37) % 100}%`,
     delay: `${(index % 9) * 0.09}s`,
     duration: `${1.8 + (index % 6) * 0.18}s`,
-    color: ["#134f5c", "#74b894", "#f6dda0", "#efafb1"][index % 4],
+    color: ["#254e5a", "#78b090", "#f5e2ac", "#e8b6b6"][index % 4],
 }));
 
 export function RankingOverlay({
@@ -180,27 +180,27 @@ export function RankingOverlay({
     return (
         <div
             ref={dialogRef}
-            className="fixed inset-0 z-[200] grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(280px,45vh)] bg-white outline-none lg:grid-cols-[minmax(0,1fr)_minmax(360px,34vw)] lg:grid-rows-1"
+            className="fixed inset-0 z-[200] grid min-h-0 grid-rows-[minmax(0,1fr)_minmax(280px,45vh)] bg-white outline-none lg:grid-cols-[minmax(0,1fr)_minmax(440px,38vw)] lg:grid-rows-1"
             role="dialog"
             aria-modal="true"
             aria-labelledby="ranking-title"
             tabIndex={-1}
         >
             <section className="flex min-h-0 flex-col bg-white">
-                <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto px-6 py-6 sm:px-10 sm:py-10">
-                    <div className="grid grid-cols-2 gap-x-5 gap-y-8 2xl:grid-cols-3">
+                <div className="no-scrollbar flex min-h-0 flex-1 items-center overflow-y-auto px-8 py-8 sm:px-14 sm:py-14">
+                    <div className="mx-auto grid w-full max-w-4xl grid-cols-[repeat(auto-fit,minmax(240px,340px))] justify-center gap-x-8 gap-y-10">
                         {photos.map((photo) => (
                             <div className="block min-w-0" key={photo.id}>
-                                <span className="relative block aspect-square w-full overflow-hidden bg-neutral-100">
+                                <span className="relative block aspect-square w-full overflow-hidden rounded-md bg-neutral-100">
                                     <PhotoImage photo={photo} alt="" />
                                 </span>
                                 <input
-                                    className="mt-3 w-full rounded-sm bg-neutral-100 px-4 py-3 text-sm text-neutral-950 outline-none placeholder:text-neutral-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                                    className="mt-4 w-full rounded-sm bg-neutral-100 px-4 py-3.5 text-base text-neutral-950 outline-none placeholder:text-neutral-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
                                     aria-label={`Dish description for ${photo.name}`}
                                     type="text"
                                     disabled={showingProgress}
                                     value={photoDescriptions[photo.id] ?? ""}
-                                    placeholder="Menu"
+                                    placeholder="Dish name"
                                     onChange={(event) => {
                                         const value = event.target.value;
                                         setPhotoDescriptions((current) => ({
@@ -215,19 +215,19 @@ export function RankingOverlay({
                 </div>
             </section>
 
-            <section className="relative min-h-0 overflow-y-auto bg-white px-6 py-8 sm:px-10 sm:py-10 lg:px-12 lg:py-14">
+            <section className="relative min-h-0 overflow-y-auto bg-neutral-50 px-8 py-10 sm:px-12 sm:py-12 lg:px-16 lg:py-16">
                 {showingProgress ? (
                     <div className="flex min-h-full flex-col" aria-live="polite">
                         <h2
-                            className="m-0 text-2xl font-semibold tracking-[-0.025em] text-neutral-950"
+                            className="m-0 text-3xl font-semibold tracking-[-0.025em] text-neutral-950 sm:text-4xl"
                             id="ranking-title"
                         >
                             Ranking {restaurantName}
                         </h2>
                         {!completed ? (
-                            <div className="mt-5 flex flex-wrap gap-3">
+                            <div className="mt-6 flex flex-wrap gap-3">
                                 <button
-                                    className="rounded-sm bg-neutral-100 px-4 py-2 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                                    className="rounded-sm bg-white px-5 py-3 text-sm font-semibold text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
                                     type="button"
                                     disabled={launching}
                                     onClick={onReopenPhone}
@@ -236,7 +236,7 @@ export function RankingOverlay({
                                 </button>
                                 {progress.state === "running" || progress.state === "paused" ? (
                                     <button
-                                        className="rounded-sm bg-neutral-100 px-4 py-2 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                                        className="rounded-sm bg-white px-5 py-3 text-sm font-semibold text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
                                         type="button"
                                         disabled={launching}
                                         onClick={onTogglePause}
@@ -246,7 +246,7 @@ export function RankingOverlay({
                                 ) : null}
                                 {progress.state === "running" || progress.state === "paused" ? (
                                     <button
-                                        className="rounded-sm bg-neutral-100 px-4 py-2 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                                        className="rounded-sm bg-white px-5 py-3 text-sm font-semibold text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
                                         type="button"
                                         disabled={launching}
                                         onClick={onCancelProcess}
@@ -255,7 +255,7 @@ export function RankingOverlay({
                                     </button>
                                 ) : (
                                     <button
-                                        className="rounded-sm bg-neutral-100 px-4 py-2 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                                        className="rounded-sm bg-white px-5 py-3 text-sm font-semibold text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
                                         type="button"
                                         disabled={launching}
                                         onClick={onCancel}
@@ -266,7 +266,7 @@ export function RankingOverlay({
                             </div>
                         ) : null}
 
-                        <ul className="mt-10 flex list-none flex-col gap-5 p-0">
+                        <ul className="mt-12 flex list-none flex-col gap-6 p-0">
                             {RANKING_STEPS.filter(
                                 (step) =>
                                     progress.steps[step.id] !== "pending" || completed,
@@ -276,7 +276,7 @@ export function RankingOverlay({
                                     progress.state === "error" && state === "active";
                                 return (
                                     <li
-                                        className={`group/step flex items-start gap-3 text-sm ${state === "complete" ? "text-neutral-400" : "text-neutral-900"}`}
+                                        className={`group/step flex items-start gap-4 text-base ${state === "complete" ? "text-neutral-400" : "text-neutral-900"}`}
                                         key={step.id}
                                     >
                                         {state === "active" && progress.state === "running" ? (
@@ -288,7 +288,7 @@ export function RankingOverlay({
                                             />
                                         ) : (
                                             <span
-                                                className="mt-0.5 size-4 shrink-0 rounded-full bg-neutral-300"
+                                                className="mt-1 size-5 shrink-0 rounded-full bg-neutral-300"
                                                 aria-hidden="true"
                                             />
                                         )}
@@ -297,7 +297,7 @@ export function RankingOverlay({
                                                 <span>{step.label}</span>
                                                 <div className="ml-auto flex gap-2 opacity-0 transition-opacity group-hover/step:opacity-100 group-focus-within/step:opacity-100">
                                                     <button
-                                                        className="rounded-xs bg-neutral-100 px-2.5 py-1.5 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 disabled:cursor-default disabled:opacity-50"
+                                                        className="rounded-xs bg-white px-3 py-2 text-xs font-semibold text-neutral-600 transition-colors hover:bg-neutral-200 disabled:cursor-default disabled:opacity-50"
                                                         type="button"
                                                         disabled={launching}
                                                         onClick={() => onRetry(step.id)}
@@ -305,7 +305,7 @@ export function RankingOverlay({
                                                         Retry from here
                                                     </button>
                                                     <button
-                                                        className="rounded-xs bg-neutral-100 px-2.5 py-1.5 text-xs text-neutral-600 transition-colors hover:bg-neutral-200 disabled:cursor-default disabled:opacity-50"
+                                                        className="rounded-xs bg-white px-3 py-2 text-xs font-semibold text-neutral-600 transition-colors hover:bg-neutral-200 disabled:cursor-default disabled:opacity-50"
                                                         type="button"
                                                         disabled={launching}
                                                         onClick={() => onSkipStep(step.id)}
@@ -330,7 +330,7 @@ export function RankingOverlay({
                                                                 Continue with added photos
                                                             </button>
                                                             <button
-                                                                className="rounded-sm bg-neutral-100 px-6 py-3 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                                                                className="rounded-sm bg-white px-6 py-3 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
                                                                 type="button"
                                                                 disabled={launching}
                                                                 onClick={onSkipPhotos}
@@ -385,29 +385,29 @@ export function RankingOverlay({
                 ) : (
                     <>
                         <h2
-                            className="m-0 text-2xl font-semibold tracking-[-0.025em] text-neutral-950"
+                            className="m-0 text-3xl font-semibold tracking-[-0.025em] text-neutral-950 sm:text-4xl"
                             id="ranking-title"
                         >
                             How was {restaurantName}?
                         </h2>
 
-                        <div className="mt-10 flex flex-col gap-5">
+                        <div className="mt-9 flex flex-col gap-6">
                             {ratings.map((option) => {
                                 const selected = rating === option.value;
                                 return (
                                     <button
-                                        className="flex items-center gap-4 bg-transparent text-left text-sm font-semibold text-neutral-700"
+                                        className="flex items-center gap-5 bg-transparent text-left text-base font-semibold text-neutral-700"
                                         type="button"
                                         aria-pressed={selected}
                                         key={option.value}
                                         onClick={() => setRating(option.value)}
                                     >
                                         <span
-                                            className={`grid size-16 shrink-0 place-items-center rounded-full ${option.color} transition-transform hover:scale-105`}
+                                            className={`grid size-20 shrink-0 place-items-center rounded-full ${option.color} transition-transform hover:scale-105`}
                                             aria-hidden="true"
                                         >
                                             {selected ? (
-                                                <FaCheck className="size-6 text-white" />
+                                                <FaCheck className="size-7 text-white" />
                                             ) : null}
                                         </span>
                                         <span>{option.label}</span>
@@ -418,7 +418,7 @@ export function RankingOverlay({
 
                         <div className="relative mt-10">
                             <textarea
-                                className="min-h-48 w-full resize-none rounded-sm bg-neutral-100 p-4 pr-14 text-sm font-normal text-neutral-950 outline-none placeholder:text-neutral-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                                className="min-h-56 w-full resize-none rounded-sm bg-white p-5 pr-14 text-base font-normal text-neutral-950 outline-none placeholder:text-neutral-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
                                 aria-label="Review"
                                 value={description}
                                 placeholder="Add a review, typed or by voice (optional)"
@@ -429,7 +429,7 @@ export function RankingOverlay({
                             />
                             {speechAvailable ? (
                                 <button
-                                    className={`absolute right-3 top-3 grid size-9 place-items-center rounded-full transition-colors ${recording ? "bg-accent text-white" : "bg-neutral-200 text-neutral-600 hover:bg-neutral-300"}`}
+                                    className={`absolute right-4 top-4 grid size-10 place-items-center rounded-full transition-colors ${recording ? "bg-accent text-white" : "bg-neutral-200 text-neutral-600 hover:bg-neutral-300"}`}
                                     type="button"
                                     aria-pressed={recording}
                                     aria-label={recording ? "Stop recording" : "Record a review"}
@@ -440,16 +440,16 @@ export function RankingOverlay({
                             ) : null}
                         </div>
 
-                        {description.trim() ? (
-                            <div className="mt-4 flex flex-col gap-3">
+                        {scoreState.status === "ready" || scoreState.status === "error" ? (
+                            <div className="mt-5 flex flex-col gap-3">
                                 {scoreState.status === "ready" ? (
-                                    <div className="rounded-sm bg-neutral-100 p-4 text-sm text-neutral-700">
+                                    <div className="rounded-sm bg-white p-5 text-sm text-neutral-700">
                                         <label className="flex items-center gap-3">
                                             <span className="font-semibold text-neutral-950">
                                                 Score
                                             </span>
                                             <input
-                                                className="w-20 rounded-sm bg-white px-2 py-1 text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                                                className="w-20 rounded-sm bg-neutral-100 px-2 py-1 text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
                                                 type="number"
                                                 min={0}
                                                 max={10}
@@ -475,9 +475,9 @@ export function RankingOverlay({
                             </div>
                         ) : null}
 
-                        <div className="mt-5 flex gap-3">
+                        <div className="mt-6 flex gap-3">
                             <button
-                                className="rounded-sm bg-neutral-100 px-6 py-3 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                                className="rounded-sm bg-white px-7 py-3.5 text-base font-semibold text-neutral-800 transition-colors hover:bg-neutral-100 disabled:opacity-50"
                                 type="button"
                                 disabled={launching}
                                 onClick={onCancel}
@@ -485,13 +485,11 @@ export function RankingOverlay({
                                 Cancel
                             </button>
                             <button
-                                className="rounded-sm bg-accent px-6 py-3 text-sm text-white transition-colors hover:bg-accent/85 disabled:opacity-50"
+                                className="rounded-sm bg-accent px-7 py-3.5 text-base font-semibold text-white transition-colors hover:bg-accent/85 disabled:opacity-50"
                                 type="button"
                                 disabled={launching || !rating || scoreState.status === "loading"}
                                 onClick={() => {
-                                    const needsScore =
-                                        description.trim().length > 0 &&
-                                        scoreState.status !== "ready";
+                                    const needsScore = scoreState.status !== "ready";
                                     if (needsScore) {
                                         onComputeScore({
                                             rating,

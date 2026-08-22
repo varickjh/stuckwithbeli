@@ -166,7 +166,7 @@ export default function Home() {
     <main className="app-shell">
       <header className="app-header">
         <div>
-          <p className="brand">Auto Beli</p>
+          <p className="brand">Beli</p>
           <p className="brand-caption">cluster, review, send</p>
         </div>
         <div className="header-actions">
@@ -180,7 +180,7 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="prototype-grid" aria-label="Auto Beli prototype screens">
+      <section className="prototype-grid" aria-label="Beli prototype screens">
         <section className="panel upload-panel">
           <PanelLabel>Input</PanelLabel>
           <button

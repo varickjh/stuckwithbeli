@@ -83,6 +83,7 @@ export function RatingsDictionaryModal({
                         if (status.state === "complete" && status.entries) {
                             const merged = { ...entries, ...status.entries };
                             setDraft(JSON.stringify(merged, null, 2));
+                            onSave(merged);
                             setSyncState({ status: "idle" });
                         } else if (status.state === "error") {
                             setSyncState({

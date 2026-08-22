@@ -135,7 +135,7 @@ export const labelStackResponseSchema = z.object({
 export type LabelStackResponse = z.infer<typeof labelStackResponseSchema>;
 
 export const reviewInputSchema = z.object({
-  text: z.string().min(1),
+  text: z.string(),
   source: z.enum(["typed", "voice"]),
 });
 

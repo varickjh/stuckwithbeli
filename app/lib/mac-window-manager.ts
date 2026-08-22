@@ -170,7 +170,7 @@ export async function openRankingWorkspace() {
         if (detail.includes("AUTO_BELI_ACCESSIBILITY_REQUIRED")) {
             throw new MacWindowManagerError(
                 "accessibility_required",
-                "Allow the app running Auto Beli in System Settings → Privacy & Security → Accessibility, then click Continue again.",
+                "Allow the app running Beli in System Settings → Privacy & Security → Accessibility, then click Continue again.",
             );
         }
 

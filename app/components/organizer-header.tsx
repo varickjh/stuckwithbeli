@@ -59,11 +59,11 @@ export function OrganizerHeader({
             </div>
 
             <Link
-                className="font-serif text-[clamp(30px,3vw,42px)] font-medium leading-none tracking-[-0.035em] text-neutral-950 no-underline max-[680px]:col-start-2 max-[680px]:row-start-1 max-[680px]:text-[29px]"
+                className="font-serif text-[clamp(30px,3vw,42px)] font-medium leading-none tracking-[-0.035em] text-accent no-underline max-[680px]:col-start-2 max-[680px]:row-start-1 max-[680px]:text-[29px]"
                 href="/"
-                aria-label="Auto Beli home"
+                aria-label="Beli home"
             >
-                Auto <span className="text-accent">Beli</span>
+                beli
             </Link>
 
             {unlabeledCount > 0 ? (
