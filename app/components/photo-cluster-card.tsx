@@ -82,7 +82,7 @@ export function PhotoClusterCard({
 
     return (
         <article
-            className={`group/card relative flex h-full min-w-0 flex-col gap-5 overflow-hidden rounded-lg bg-neutral-100 p-6 text-neutral-950 transition-colors duration-200 ${isDropTarget ? "bg-accent/20" : cluster.ranked ? "bg-neutral-200 grayscale" : "hover:bg-neutral-200"}`}
+            className={`group/card relative flex h-full min-w-0 flex-col gap-5 overflow-hidden rounded-[20px] p-6 text-ink transition-colors duration-200 ${isDropTarget ? "bg-accent-tint-2" : cluster.ranked ? "bg-card opacity-75 grayscale-[50%]" : cluster.labelStatus === "error" ? "bg-disliked-tint" : "bg-card hover:bg-card-2"}`}
             title={cluster.labelError ?? undefined}
             onDragEnter={(event) => {
                 if (!isPhotoDrag(event)) return;
@@ -113,7 +113,7 @@ export function PhotoClusterCard({
                 if (photoId) onMovePhoto(photoId, cluster.id);
             }}
         >
-            <p className="text-sm text-neutral-500 text-center -mb-4">
+            <p className="text-sm text-muted text-center -mb-4">
                 {formatClusterDate(cluster)}
             </p>
 
@@ -162,7 +162,7 @@ export function PhotoClusterCard({
                             <PhotoImage photo={photo} alt="" />
                             {index === 0 ? (
                                 <button
-                                    className="rounded-xs absolute right-2 top-2 z-20 grid size-8 place-items-center bg-white text-neutral-950 opacity-0 transition-opacity hover:opacity-80 focus:opacity-100 group-hover:opacity-100"
+                                    className="rounded-full absolute right-2 top-2 z-20 grid size-8 place-items-center bg-white text-ink opacity-0 transition-opacity hover:opacity-80 focus:opacity-100 group-hover:opacity-100"
                                     type="button"
                                     draggable={false}
                                     aria-label={`Delete ${photo.name}`}
@@ -215,7 +215,7 @@ export function PhotoClusterCard({
                                 className={
                                     draggedPhotoId
                                         ? "hidden"
-                                        : "rounded-xs absolute right-1 top-1 z-20 grid size-6 place-items-center bg-white text-neutral-950 opacity-0 transition-opacity hover:opacity-80 focus:opacity-100 group-hover/preview:opacity-100"
+                                        : "rounded-full absolute right-1 top-1 z-20 grid size-6 place-items-center bg-white text-ink opacity-0 transition-opacity hover:opacity-80 focus:opacity-100 group-hover/preview:opacity-100"
                                 }
                                 type="button"
                                 draggable={false}
@@ -250,8 +250,12 @@ export function PhotoClusterCard({
                         }
                     />
                 ) : null}
-                {address ? (
-                    <p className="m-0 text-sm leading-relaxed text-neutral-500">
+                {cluster.labelStatus === "error" ? (
+                    <p className="m-0 text-sm leading-relaxed text-error">
+                        {cluster.labelError ?? "Couldn't match — try again"}
+                    </p>
+                ) : address ? (
+                    <p className="m-0 text-sm leading-relaxed text-muted-2">
                         {address}
                     </p>
                 ) : null}
@@ -273,11 +277,15 @@ export function PhotoClusterCard({
 
             {canLabel ? (
                 <button
-                    className="rounded-sm bg-accent px-3 py-2 text-sm text-white transition-colors hover:bg-accent/85 disabled:opacity-50"
+                    className={
+                        cluster.labelStatus === "error"
+                            ? "rounded-full bg-disliked px-3 py-2.5 text-sm font-bold text-error-dark transition-colors hover:opacity-85"
+                            : "rounded-full bg-accent px-3 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent/85"
+                    }
                     type="button"
                     onClick={() => onLabel(cluster.id)}
                 >
-                    Label
+                    {cluster.labelStatus === "error" ? "Retry" : "Label"}
                 </button>
             ) : null}
 
@@ -285,20 +293,20 @@ export function PhotoClusterCard({
                 <button
                     className={
                         cluster.ranked
-                            ? "rounded-sm bg-neutral-300 px-3 py-2 text-sm text-neutral-500"
-                            : "rounded-sm bg-accent px-3 py-2 text-sm text-white transition-colors hover:bg-accent/85"
+                            ? "rounded-full bg-skeleton px-3 py-2.5 text-sm font-bold text-muted-2"
+                            : "rounded-full bg-accent px-3 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent/85"
                     }
                     type="button"
                     disabled={cluster.ranked}
                     onClick={() => onOpenRanking(cluster.id)}
                 >
-                    {cluster.ranked ? "Ranked" : "Rank"}
+                    {cluster.ranked ? "✓ Ranked" : "Rank"}
                 </button>
             ) : null}
 
             {cluster.labelStatus === "matching" ? (
                 <div
-                    className="absolute inset-0 z-[110] grid place-items-center bg-neutral-200/90"
+                    className="absolute inset-0 z-[110] grid place-items-center bg-card/90"
                     aria-label="Matching location"
                 >
                     <SquareLoader
@@ -311,7 +319,7 @@ export function PhotoClusterCard({
 
             {cluster.labelStatus === "queued" ? (
                 <div
-                    className="absolute inset-0 z-[110] grid place-items-center bg-neutral-200/90"
+                    className="absolute inset-0 z-[110] grid place-items-center bg-card/90"
                     aria-label="Matching location"
                 >
                     <SquareLoader

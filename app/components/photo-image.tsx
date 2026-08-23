@@ -12,7 +12,7 @@ export function PhotoImage({ photo, alt }: PhotoImageProps) {
     if (!photo.previewable) {
         return (
             <span
-                className="absolute inset-0 grid place-items-center bg-neutral-100 font-sans text-neutral-600"
+                className="absolute inset-0 grid place-items-center rounded-[18px] bg-card font-sans text-muted"
                 aria-label={`${photo.name}, preview unavailable`}
             >
                 <span className="text-sm">{extensionFor(photo.name)}</span>
@@ -22,7 +22,7 @@ export function PhotoImage({ photo, alt }: PhotoImageProps) {
 
     return (
         <Image
-            className="object-cover rounded-sm"
+            className="object-cover rounded-[18px]"
             src={photo.url}
             alt={alt}
             fill

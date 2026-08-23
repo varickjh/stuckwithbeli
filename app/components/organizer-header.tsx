@@ -30,9 +30,9 @@ export function OrganizerHeader({
 
     return (
         <header className="relative z-10 mx-auto grid w-full max-w-7xl grid-cols-[1fr_auto_1fr] items-center gap-6 py-6 max-[680px]:grid-cols-[1fr_auto]">
-            <div className="flex items-center gap-3 justify-self-start">
+            <div className="flex items-center gap-2 justify-self-start">
                 <button
-                    className="rounded-sm w-fit bg-neutral-100 px-4 py-3 font-sans text-[15px] text-neutral-700 transition-colors hover:bg-neutral-200 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="w-fit rounded-full bg-accent px-4.5 py-2.5 font-sans text-[14px] font-semibold text-white transition-colors hover:bg-accent/85 disabled:cursor-not-allowed disabled:opacity-50"
                     type="button"
                     onClick={onChooseFiles}
                     disabled={processing || labeling}
@@ -40,7 +40,7 @@ export function OrganizerHeader({
                     {hasPhotos ? "Add photos" : "Choose files"}
                 </button>
                 <button
-                    className="rounded-sm w-fit bg-transparent px-4 py-3 font-sans text-[15px] text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700"
+                    className="w-fit rounded-full bg-card-2 px-4.5 py-2.5 font-sans text-[14px] font-semibold text-accent transition-colors hover:bg-divider"
                     type="button"
                     onClick={onOpenRatingsDictionary}
                 >
@@ -48,7 +48,7 @@ export function OrganizerHeader({
                 </button>
                 {hasPhotos ? (
                     <button
-                        className="rounded-sm w-fit bg-transparent px-4 py-3 font-sans text-[15px] text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="w-fit rounded-full bg-card-2 px-4.5 py-2.5 font-sans text-[14px] font-semibold text-muted transition-colors hover:bg-divider disabled:cursor-not-allowed disabled:opacity-50"
                         type="button"
                         onClick={onClear}
                         disabled={processing || labeling}
@@ -59,16 +59,16 @@ export function OrganizerHeader({
             </div>
 
             <Link
-                className="font-serif text-[clamp(30px,3vw,42px)] font-medium leading-none tracking-[-0.035em] text-accent no-underline max-[680px]:col-start-2 max-[680px]:row-start-1 max-[680px]:text-[29px]"
+                className="font-serif text-[clamp(28px,2.6vw,36px)] font-bold italic leading-none tracking-[-0.02em] text-accent-dark no-underline max-[680px]:col-start-2 max-[680px]:row-start-1 max-[680px]:text-[26px]"
                 href="/"
-                aria-label="Beli home"
+                aria-label="stuckwithfood home"
             >
-                beli
+                stuckwithfood
             </Link>
 
             {unlabeledCount > 0 ? (
                 <button
-                    className="rounded-sm w-fit justify-self-end bg-accent px-4 py-3 font-sans text-[15px] text-white transition-colors hover:bg-accent/85 disabled:cursor-not-allowed disabled:opacity-50 max-[680px]:col-span-2 max-[680px]:w-full"
+                    className="w-fit justify-self-end rounded-full bg-accent px-5 py-2.5 font-sans text-[14px] font-bold text-white transition-colors hover:bg-accent/85 disabled:cursor-not-allowed disabled:opacity-50 max-[680px]:col-span-2 max-[680px]:w-full"
                     type="button"
                     disabled={processing || labeling}
                     onClick={onLabel}

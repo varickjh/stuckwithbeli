@@ -141,19 +141,19 @@ export function RatingsDictionaryModal({
 
     return (
         <div
-            className="fixed inset-0 z-[210] grid place-items-center bg-neutral-950/40 p-6"
+            className="fixed inset-0 z-[210] grid place-items-center bg-accent-dark/40 p-6"
             role="dialog"
             aria-modal="true"
             aria-labelledby="ratings-dictionary-title"
         >
-            <div className="w-full max-w-lg rounded-sm bg-white p-8">
+            <div className="w-full max-w-lg rounded-3xl bg-white p-8">
                 <h2
-                    className="m-0 text-xl font-semibold tracking-[-0.025em] text-neutral-950"
+                    className="m-0 font-serif text-xl font-bold tracking-[-0.02em] text-accent-dark"
                     id="ratings-dictionary-title"
                 >
                     My existing ratings
                 </h2>
-                <p className="mt-2 text-sm text-neutral-500">
+                <p className="mt-1 text-sm text-muted-2">
                     {entryCount
                         ? `${entryCount} restaurant${entryCount === 1 ? "" : "s"} loaded${
                               syncedAt
@@ -163,15 +163,15 @@ export function RatingsDictionaryModal({
                         : "No ratings loaded yet."}
                 </p>
 
-                <div className="mt-4 rounded-sm bg-neutral-100 p-4">
-                    <p className="text-sm text-neutral-700">
+                <div className="mt-4 rounded-2xl bg-accent-tint p-5">
+                    <p className="text-sm text-ink">
                         On the mirrored iPhone, open Beli and navigate to your own
                         ratings list so it&apos;s visible on screen, then sync — this
                         scrolls through and reads whatever list is currently showing.
                     </p>
                     <div className="mt-3 flex items-center gap-3">
                         <button
-                            className="rounded-sm bg-white px-4 py-2 text-sm text-neutral-800 transition-colors hover:bg-neutral-200 disabled:opacity-50"
+                            className="rounded-full bg-accent px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent/85 disabled:opacity-50"
                             type="button"
                             disabled={syncState.status === "running"}
                             onClick={() => void startSync()}
@@ -182,7 +182,7 @@ export function RatingsDictionaryModal({
                         </button>
                         {syncState.status === "running" ? (
                             <button
-                                className="rounded-sm bg-white px-4 py-2 text-sm text-neutral-600 transition-colors hover:bg-neutral-200"
+                                className="rounded-full bg-white px-5 py-2.5 text-sm font-semibold text-muted transition-colors hover:bg-card-2"
                                 type="button"
                                 onClick={() => void cancelSync()}
                             >
@@ -191,39 +191,39 @@ export function RatingsDictionaryModal({
                         ) : null}
                     </div>
                     {syncState.status === "running" && syncState.message ? (
-                        <p className="mt-2 text-sm text-neutral-500">
+                        <p className="mt-2 text-sm text-muted">
                             {syncState.message}
                         </p>
                     ) : null}
                     {syncState.status === "error" ? (
-                        <p className="mt-2 text-sm text-[#c25b5f]">{syncState.error}</p>
+                        <p className="mt-2 text-sm text-error">{syncState.error}</p>
                     ) : null}
                 </div>
 
-                <p className="mt-4 text-sm text-neutral-500">
+                <p className="mt-4 text-sm text-muted">
                     Or paste/edit the JSON directly — restaurant name to a score
                     (0–10):
                 </p>
 
                 <textarea
-                    className="mt-2 min-h-64 w-full resize-none rounded-sm bg-neutral-100 p-4 font-mono text-xs text-neutral-950 outline-none placeholder:text-neutral-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-950"
+                    className="mt-2 min-h-64 w-full resize-none rounded-2xl bg-card p-4 font-mono text-xs text-ink outline-none placeholder:text-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-dark"
                     aria-label="Existing ratings JSON"
                     value={draft}
                     placeholder={'{\n  "Joe\'s Pizza": 8.4,\n  "Blue Bottle Coffee": 7.1\n}'}
                     onChange={(event) => setDraft(event.target.value)}
                 />
-                {error ? <p className="mt-2 text-sm text-[#c25b5f]">{error}</p> : null}
+                {error ? <p className="mt-2 text-sm text-error">{error}</p> : null}
 
-                <div className="mt-6 flex gap-3">
+                <div className="mt-6 flex justify-end gap-3">
                     <button
-                        className="rounded-sm bg-neutral-100 px-6 py-3 text-sm text-neutral-800 transition-colors hover:bg-neutral-200"
+                        className="rounded-full bg-card-2 px-6 py-3 text-sm font-semibold text-ink transition-colors hover:bg-divider"
                         type="button"
                         onClick={onClose}
                     >
                         Cancel
                     </button>
                     <button
-                        className="rounded-sm bg-accent px-6 py-3 text-sm text-white transition-colors hover:bg-accent/85"
+                        className="rounded-full bg-accent px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-accent/85"
                         type="button"
                         onClick={save}
                     >

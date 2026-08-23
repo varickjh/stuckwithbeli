@@ -8,14 +8,14 @@ type PhotoContextMenuProps = {
 export function PhotoContextMenu({ menu, onSplit }: PhotoContextMenuProps) {
   return (
     <div
-      className="fixed z-[60] min-w-[212px] rounded-sm bg-neutral-200 p-2 font-sans text-neutral-950"
+      className="fixed z-[60] min-w-[212px] rounded-2xl bg-white p-2 font-sans text-ink"
       role="menu"
       tabIndex={-1}
       style={{ left: menu.x, top: menu.y }}
       onContextMenu={(event) => event.preventDefault()}
     >
       <button
-        className="w-full rounded-xs bg-transparent px-3 py-3 text-left text-sm text-neutral-950 transition-colors hover:bg-neutral-50 focus:bg-neutral-50"
+        className="w-full rounded-xl bg-transparent px-3.5 py-2.5 text-left text-sm font-semibold text-ink transition-colors hover:bg-card-2 focus:bg-card-2"
         type="button"
         role="menuitem"
         onClick={() => onSplit(menu.clusterId, menu.photoId)}

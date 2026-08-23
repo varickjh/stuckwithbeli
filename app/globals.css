@@ -3,7 +3,28 @@
 @theme inline {
     --font-serif: var(--font-crimson-pro);
     --font-sans: var(--font-open-sans);
-    --color-accent: #254e5a;
+    --color-accent: #234b56;
+    --color-accent-dark: #17323a;
+    --color-accent-tint: #f1f6f6;
+    --color-accent-tint-2: #e4edee;
+    --color-warm: #f7f5f2;
+    --color-card: #f4f2ee;
+    --color-card-2: #f0efec;
+    --color-divider: #e2e0db;
+    --color-skeleton: #e6e3db;
+    --color-ink: #1c1c1a;
+    --color-muted: #6b6b66;
+    --color-muted-2: #8a887f;
+    --color-liked: #78b090;
+    --color-liked-tint: #e9f2ec;
+    --color-fine: #f5e2ac;
+    --color-fine-tint: #fbf5e6;
+    --color-disliked: #e8b6b6;
+    --color-disliked-tint: #faebeb;
+    --color-error: #b5504f;
+    --color-error-dark: #7a2f2f;
+    --color-score-good: #1f7a4d;
+    --color-score-good-bg: #d9efe0;
 }
 
 html {

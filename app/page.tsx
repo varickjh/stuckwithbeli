@@ -908,11 +908,11 @@ export default function Home() {
                 <section className="mx-auto w-full max-w-7xl pt-10" aria-live="polite">
                     <div className="mb-10 flex items-end justify-between gap-6 max-[680px]:flex-col max-[680px]:items-start">
                         <div>
-                            <h1 className="m-0 font-sans text-[clamp(32px,3vw,40px)] font-semibold leading-none tracking-[-0.035em] text-neutral-950">
+                            <h1 className="m-0 font-serif text-[clamp(32px,3vw,40px)] font-bold leading-none tracking-[-0.02em] text-accent-dark">
                                 {clusters.length} meal{clusters.length === 1 ? "" : "s"}
                             </h1>
                             {message ? (
-                                <p className="mt-3 font-sans text-[15px] text-neutral-500">
+                                <p className="mt-3 font-sans text-[15px] text-muted">
                                     {message}
                                 </p>
                             ) : null}
@@ -970,10 +970,20 @@ export default function Home() {
 
             {draggingOver ? (
                 <div
-                    className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-neutral-100/95 font-sans text-[clamp(38px,7vw,82px)] font-semibold tracking-[-0.05em] text-accent"
+                    className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-accent/80"
                     aria-hidden="true"
                 >
-                    <span>Drop to add photos</span>
+                    <div className="flex flex-col items-center gap-3 rounded-[28px] bg-white px-16 py-14 text-center">
+                        <span className="grid size-16 place-items-center rounded-full bg-accent-tint-2 text-2xl text-accent">
+                            ↓
+                        </span>
+                        <span className="font-serif text-3xl font-bold text-accent-dark">
+                            Drop to add photos
+                        </span>
+                        <span className="text-sm text-muted-2">
+                            We&apos;ll sort them into meals by time and location
+                        </span>
+                    </div>
                 </div>
             ) : null}
             </main>

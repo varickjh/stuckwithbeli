@@ -46,7 +46,7 @@ export function PlaceCombobox({
 
     return (
         <select
-            className="w-full min-w-0 appearance-none bg-transparent font-sans text-[clamp(20px,1.6vw,26px)] font-bold leading-tight text-neutral-950 outline-none focus:outline-none"
+            className="w-full min-w-0 appearance-none bg-transparent font-serif text-[clamp(20px,1.6vw,26px)] font-bold leading-tight text-accent-dark outline-none focus:outline-none"
             aria-label="Location"
             value={selectedValue}
             onChange={(event) => chooseLocation(event.target.value)}
