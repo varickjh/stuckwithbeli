@@ -1,3 +1,4 @@
+import { getPhotoBlob } from "./photo-processing";
 import type { Photo } from "./photo-types";
 import type { LabelPhotoInput } from "./photo-types";
 
@@ -32,7 +33,8 @@ function blobToBase64(blob: Blob) {
 }
 
 async function resizePhoto(photo: Photo): Promise<LabelPhotoInput> {
-  const bitmap = await createImageBitmap(photo.blob, {
+  const blob = await getPhotoBlob(photo);
+  const bitmap = await createImageBitmap(blob, {
     imageOrientation: "from-image",
   });
 

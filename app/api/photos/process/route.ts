@@ -6,6 +6,9 @@ import { promisify } from "node:util";
 
 import exifr from "exifr";
 
+import { extensionForMediaType, mediaTypeForExtension } from "../../../lib/media-type";
+import { PHOTOS_DIR, ensurePhotosDir } from "../../../lib/server-store";
+
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
@@ -27,21 +30,6 @@ const IMAGE_EXTENSIONS = new Set([
 
 function replaceExtension(value: string, extension: string) {
   return value.replace(/\.[^.]+$/, extension);
-}
-
-function mediaTypeFor(extension: string, fallback: string) {
-  const mediaTypes: Record<string, string> = {
-    ".avif": "image/avif",
-    ".bmp": "image/bmp",
-    ".gif": "image/gif",
-    ".jpeg": "image/jpeg",
-    ".jpg": "image/jpeg",
-    ".png": "image/png",
-    ".tif": "image/tiff",
-    ".tiff": "image/tiff",
-    ".webp": "image/webp",
-  };
-  return (mediaTypes[extension] ?? fallback) || "application/octet-stream";
 }
 
 function validTimestamp(value: unknown) {
@@ -134,8 +122,12 @@ export async function POST(request: Request) {
       : displayPath;
     const mediaType = isHeic
       ? "image/jpeg"
-      : mediaTypeFor(extension, upload.type);
+      : mediaTypeForExtension(extension, upload.type);
     const effectiveTakenAt = takenAt ?? fallbackTakenAt;
+
+    await ensurePhotosDir();
+    const storedFilename = `${crypto.randomUUID()}${extensionForMediaType(mediaType)}`;
+    await writeFile(join(PHOTOS_DIR, storedFilename), output);
 
     console.info("[photos/process]", {
       latitude,
@@ -156,6 +148,7 @@ export async function POST(request: Request) {
       path: outputDisplayPath,
       size: output.byteLength,
       takenAt: effectiveTakenAt,
+      url: `/api/photos/blob/${storedFilename}`,
     });
   } catch (error) {
     const message =

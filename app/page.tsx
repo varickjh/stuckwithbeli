@@ -19,20 +19,23 @@ import {
 import { RatingsDictionaryModal } from "./components/ratings-dictionary-modal";
 import {
     addPhotosToClusters,
-    checksumBlob,
     clusterCoordinate,
     clusterCity,
+    getPhotoBlob,
     processFiles,
 } from "./lib/photo-processing";
 import {
     clearBrowserData,
+    saveLabelLog,
+    saveScoreLog,
+} from "./lib/browser-storage";
+import {
+    clearServerData,
     loadClusters,
     loadRatingsDictionary,
     saveClusters,
-    saveLabelLog,
     saveRatingsDictionary,
-    saveScoreLog,
-} from "./lib/browser-storage";
+} from "./lib/server-storage";
 import { resizePhotosForLabeling } from "./lib/image-resize";
 import {
     PHOTO_DRAG_TYPE,
@@ -77,47 +80,26 @@ export default function Home() {
     const rankingSessionId = rankingProgress?.id ?? null;
     const rankingSessionState = rankingProgress?.state ?? null;
     const inputRef = useRef<HTMLInputElement>(null);
-    const objectUrls = useRef<string[]>([]);
-
-    useEffect(() => {
-        const urls = objectUrls;
-        return () => urls.current.forEach((url) => URL.revokeObjectURL(url));
-    }, []);
 
     useEffect(() => {
         let cancelled = false;
         void loadClusters()
-            .then(async (savedClusters) => {
+            .then((savedClusters) => {
                 if (cancelled) return;
-                const restored = await Promise.all(
-                    savedClusters.map(async (cluster) => ({
-                        ...cluster,
-                        ranked: cluster.ranked ?? false,
-                        labelStatus:
-                            cluster.labelStatus === "matching" ||
-                                cluster.labelStatus === "queued"
-                                ? ("ready" as const)
-                                : (cluster.labelStatus ?? "ready"),
-                        placesSearch: cluster.placesSearch ?? null,
-                        match: cluster.match ?? null,
-                        category: cluster.category ?? cluster.match?.category ?? null,
-                        selection: cluster.selection ?? null,
-                        labelError: cluster.labelError ?? null,
-                        photos: await Promise.all(
-                            cluster.photos.map(async (photo) => {
-                                const url = URL.createObjectURL(photo.blob);
-                                objectUrls.current.push(url);
-                                return {
-                                    ...photo,
-                                    checksum:
-                                        photo.checksum ?? await checksumBlob(photo.blob),
-                                    url,
-                                };
-                            }),
-                        ),
-                    })),
-                );
-                if (cancelled) return;
+                const restored = savedClusters.map((cluster) => ({
+                    ...cluster,
+                    ranked: cluster.ranked ?? false,
+                    labelStatus:
+                        cluster.labelStatus === "matching" ||
+                            cluster.labelStatus === "queued"
+                            ? ("ready" as const)
+                            : (cluster.labelStatus ?? "ready"),
+                    placesSearch: cluster.placesSearch ?? null,
+                    match: cluster.match ?? null,
+                    category: cluster.category ?? cluster.match?.category ?? null,
+                    selection: cluster.selection ?? null,
+                    labelError: cluster.labelError ?? null,
+                }));
                 setClusters(restored);
                 if (restored.length) setMessage("");
             })
@@ -148,9 +130,12 @@ export default function Home() {
 
     useEffect(() => {
         if (!hydrated) return;
-        void saveClusters(clusters).catch((error) =>
-            console.error("Could not save photo progress", error),
-        );
+        const timeout = window.setTimeout(() => {
+            void saveClusters(clusters).catch((error) =>
+                console.error("Could not save photo progress", error),
+            );
+        }, 400);
+        return () => window.clearTimeout(timeout);
     }, [clusters, hydrated]);
 
     useEffect(() => {
@@ -210,7 +195,6 @@ export default function Home() {
                     cluster.photos.map((photo) => photo.checksum),
                 ),
             );
-            objectUrls.current.push(...photos.map((photo) => photo.url));
             setClusters((current) => addPhotosToClusters(current, photos));
             setMessage(
                 photos.length
@@ -288,24 +272,14 @@ export default function Home() {
     };
 
     const deletePhoto = (photoId: string) => {
-        setClusters((current) => {
-            const photo = current
-                .flatMap((cluster) => cluster.photos)
-                .find((item) => item.id === photoId);
-            if (photo) {
-                URL.revokeObjectURL(photo.url);
-                objectUrls.current = objectUrls.current.filter(
-                    (url) => url !== photo.url,
-                );
-            }
-
-            return current
+        setClusters((current) =>
+            current
                 .map((cluster) => ({
                     ...cluster,
                     photos: cluster.photos.filter((item) => item.id !== photoId),
                 }))
-                .filter((cluster) => cluster.photos.length > 0);
-        });
+                .filter((cluster) => cluster.photos.length > 0),
+        );
     };
 
     const splitIntoSeparateMeal = (clusterId: string, photoId: string) => {
@@ -360,10 +334,11 @@ export default function Home() {
 
     const clearAll = () => {
         if (!window.confirm("Clear all photos, labels, and saved progress?")) return;
-        objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
-        objectUrls.current = [];
         setClusters([]);
         setMessage("Drop photos or a zip anywhere");
+        void clearServerData().catch((error) =>
+            console.error("Could not clear saved progress", error),
+        );
         void clearBrowserData().catch((error) =>
             console.error("Could not clear saved progress", error),
         );
@@ -577,7 +552,7 @@ export default function Home() {
                 formData.set("computedScore", String(feedback.score));
             }
             for (const photo of cluster.photos) {
-                formData.append("photos", photo.blob, photo.name);
+                formData.append("photos", await getPhotoBlob(photo), photo.name);
             }
             const response = await fetch("/api/rank", {
                 method: "POST",
@@ -956,7 +931,6 @@ export default function Home() {
             ) : (
                 <EmptyUpload
                     processing={processing}
-                    message={message}
                     onChooseFiles={chooseFiles}
                 />
             )}

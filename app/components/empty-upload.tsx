@@ -25,13 +25,11 @@ const placeholderImages = [
 
 type EmptyUploadProps = {
     processing: boolean;
-    message: string;
     onChooseFiles: () => void;
 };
 
 export function EmptyUpload({
     processing,
-    message,
     onChooseFiles,
 }: EmptyUploadProps) {
     return (
