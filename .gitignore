@@ -41,6 +41,9 @@ yarn-error.log*
 /outputs/
 /work/
 /logs/
+/data/
 
 beli_ss
 beli_ss/*
+AGENTS.md
+/ui

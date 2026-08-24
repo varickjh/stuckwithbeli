@@ -273,11 +273,28 @@ private final class BeliAutomation {
         start("start_rating")
         let image = try await capture.image()
         guard let plusPoint = Self.findTealCircle(in: image) else {
+            saveTealDebugImage(image)
             throw AutomationFailure.message("The teal rating button could not be found.")
         }
         try await clickThroughScreenshot(plusPoint)
         try await pause(1)
         finish("start_rating")
+    }
+
+    // Saved only when findTealCircle fails to find a match on a live run, so a real
+    // failure case (as opposed to a hand-picked test screenshot) can be inspected later.
+    private func saveTealDebugImage(_ image: CGImage) {
+        guard let debugDirectory = configuration.debugDirectory else { return }
+        let url = URL(fileURLWithPath: debugDirectory).appendingPathComponent("teal-search-failed.png")
+        try? Foundation.FileManager().removeItem(at: url)
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL,
+            "public.png" as CFString,
+            1,
+            nil
+        ) else { return }
+        CGImageDestinationAddImage(destination, image, nil)
+        CGImageDestinationFinalize(destination)
     }
 
     private func choosingCategory() async throws {
@@ -491,7 +508,23 @@ private final class BeliAutomation {
         }
         try await addPhotoDescriptions(descriptions)
         let save = try await waitForText("save", timeout: 35) { $0.center.y < 0.18 }
-        try await clickThroughScreenshot(save.center)
+        // Blindly double-tapping here (as clickThroughScreenshot does) risks the
+        // second tap landing on whatever the review screen shows at this same
+        // top-right spot -- confirmed live, it hit the "X" close button there
+        // instead of Save having simply not registered. Retry and check each time
+        // whether the review screen ("How was it?") actually appeared, same
+        // pattern used for opening each photo's description editor.
+        var saved = false
+        for _ in 0..<5 {
+            try await clickDetectedTarget(save.center)
+            if try await findText("how was it", timeout: 2) != nil {
+                saved = true
+                break
+            }
+        }
+        guard saved else {
+            throw AutomationFailure.message("Could not confirm the photo descriptions were saved.")
+        }
         finish("add_photo_descriptions")
     }
 
@@ -501,12 +534,104 @@ private final class BeliAutomation {
             throw AutomationFailure.message("No added photos were found to describe.")
         }
 
+        // Drive this off what's actually still unfilled on screen rather than a
+        // precomputed photo count -- that count (from loadSelectedPhotoOrder) can
+        // drift from the real number of rows Beli shows. Hard-cap total attempts at
+        // descriptions.count + 1 as a backup guardrail: even if something upstream
+        // keeps reporting an unfilled field that never actually clears, this loop
+        // cannot run away scrolling indefinitely looking for one more photo.
+        var filledCount = 0
+        let maxAttempts = descriptions.count + 1
+        while filledCount < maxAttempts {
+            guard let prompt = try await findUnfilledDescriptionPrompt(maxScrolls: maxAttempts) else {
+                break
+            }
+            guard filledCount < descriptions.count else {
+                throw AutomationFailure.message("Found more photos to describe than descriptions were provided.")
+            }
+            let description = descriptions[filledCount]
+
+            // A single tap silently failed to focus this field live -- but blindly
+            // double-tapping risks the second tap landing on the editor screen the
+            // first tap just opened, since a pushed detail screen doesn't share the
+            // list row's layout. Retry the tap and check each time whether the
+            // editor actually opened, same pattern as the "Done" retry below for
+            // the notes sheet.
+            var editorOpened = false
+            for _ in 0..<5 {
+                try await clickDetectedTarget(prompt.center)
+                if try await findText("description", timeout: 2, predicate: { $0.center.y < 0.2 }) != nil {
+                    editorOpened = true
+                    break
+                }
+            }
+            guard editorOpened else {
+                throw AutomationFailure.message("Could not open the description editor for photo \(filledCount + 1).")
+            }
+
+            try await pause(0.6)
+            try typeText(description)
+
+            // Verify the text actually landed before moving on -- a focus click
+            // that silently failed would otherwise leave this photo's description
+            // empty while the loop happily continues to the next one.
+            if try await findText(description, timeout: 2) == nil {
+                throw AutomationFailure.message("Photo description \(filledCount + 1) did not receive the typed text.")
+            }
+
+            // Whether this is the last photo is exactly what we're trying to avoid
+            // predicting from a possibly-stale count -- accept whichever of
+            // "Next"/"Done" the editor actually shows.
+            let button = try await waitForNextOrDoneButton()
+            try await clickDetectedTarget(button.center)
+            filledCount += 1
+            emit(
+                type: "diagnostic",
+                step: "add_photo_descriptions",
+                message: "added photo description \(filledCount)"
+            )
+        }
+
+        guard filledCount > 0 else {
+            throw AutomationFailure.message("No added photos were found to describe.")
+        }
+        if filledCount != descriptions.count {
+            emit(
+                type: "diagnostic",
+                step: "add_photo_descriptions",
+                message: "filled \(filledCount) photo description(s), expected \(descriptions.count)"
+            )
+        }
+
+        _ = try await waitForText("photo upload", timeout: 20) {
+            $0.center.y < 0.2
+        }
+    }
+
+    private func waitForNextOrDoneButton() async throws -> OCRItem {
+        let deadline = Date().addingTimeInterval(12)
+        while Date() < deadline {
+            let items = try recognizeText(in: await capture.image()).filter { $0.center.y < 0.2 }
+            if let button = bestTextMatch("done", in: items) ?? bestTextMatch("next", in: items) {
+                return button
+            }
+            try await pause(0.35)
+        }
+        throw AutomationFailure.message("Could not find a Next/Done button after entering a photo description.")
+    }
+
+    // Scans the Photo Upload list (scrolling as needed) for the topmost still-unfilled
+    // "What's this?" placeholder. Returns nil once scrolling stops revealing new content
+    // or maxScrolls is hit -- capped relative to the actual photo count (rather than a
+    // flat 40) since a short list needs at most one scroll per remaining photo, and a
+    // fixed high cap turned a "nothing left to find" case into a long, visible scroll-hunt.
+    private func findUnfilledDescriptionPrompt(maxScrolls: Int) async throws -> OCRItem? {
         var prompt: OCRItem?
         var previousScreenFeature: [Float]?
         var unchangedScreens = 0
         var scrolls = 0
 
-        while prompt == nil && scrolls < 40 {
+        while prompt == nil && scrolls < maxScrolls {
             let image = try await capture.image()
             let items = try recognizeText(in: image)
             prompt = items
@@ -534,36 +659,7 @@ private final class BeliAutomation {
             scrolls += 1
         }
 
-        guard let prompt else {
-            throw AutomationFailure.message("No added photos were found to describe.")
-        }
-        try await clickDetectedTarget(prompt.center)
-
-        for (index, description) in descriptions.enumerated() {
-            _ = try await waitForText("description", timeout: 12) {
-                $0.center.y < 0.2
-            }
-            try await pause(0.6)
-            try typeText(description)
-
-            let isLastDescription = index == descriptions.count - 1
-            let button = try await waitForText(
-                isLastDescription ? "done" : "next",
-                timeout: 12
-            ) {
-                $0.center.y < 0.2
-            }
-            try await clickDetectedTarget(button.center)
-            emit(
-                type: "diagnostic",
-                step: "add_photo_descriptions",
-                message: "added photo description \(index + 1)"
-            )
-        }
-
-        _ = try await waitForText("photo upload", timeout: 20) {
-            $0.center.y < 0.2
-        }
+        return prompt
     }
 
     private func finishingInBeli() async throws {
@@ -1505,16 +1601,22 @@ private final class BeliAutomation {
             return green > red + 12 && blue > red + 12 && green > 65 && blue > 65
         }
 
-        for y in stride(
-            from: Int(Double(height) * 0.36),
-            to: Int(Double(height) * 0.47),
+        // The title/rating row (and thus the +/bookmark row below it) shifts down when a
+        // restaurant name wraps to two lines or extra badges appear above it, so this band
+        // has to be wide enough to cover that variance rather than one restaurant's layout.
+        let yStride = stride(
+            from: Int(Double(height) * 0.28),
+            to: Int(Double(height) * 0.58),
             by: 2
-        ) {
-            for x in stride(
-                from: Int(Double(width) * 0.72),
-                to: Int(Double(width) * 0.84),
-                by: 2
-            ) {
+        )
+        let xStride = stride(
+            from: Int(Double(width) * 0.72),
+            to: Int(Double(width) * 0.84),
+            by: 2
+        )
+
+        search: for y in yStride {
+            for x in xStride {
                 var score = 0
                 for sample in 0..<40 {
                     let angle = Double(sample) / 40 * .pi * 2
@@ -1525,13 +1627,16 @@ private final class BeliAutomation {
                 if best == nil || score > best!.score {
                     best = (x, y, score)
                 }
+                // Near-perfect ring match: stop scanning downward immediately so a wider
+                // band can't skip past the +/bookmark row onto the teal score rings below it.
+                if score >= 34 { break search }
             }
         }
 
         guard let best, best.score >= 8 else { return nil }
         return CGPoint(
-            x: Double(best.x) / Double(width) + 0.03,
-            y: Double(best.y) / Double(height) + 0.04
+            x: Double(best.x) / Double(width),
+            y: Double(best.y) / Double(height)
         )
     }
 

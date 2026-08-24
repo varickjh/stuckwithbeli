@@ -1,6 +1,8 @@
-# Auto Beli
+# stuckwithfood
 
-Auto Beli groups meal photos, matches them to nearby restaurants, and helps add them to Beli.
+stuckwithfood groups meal photos, matches them to nearby restaurants, and helps add them to Beli.
+
+This only runs on a Mac with iPhone Mirroring set up against your own iPhone — there's no hosted or mobile-app version, since the automation drives iPhone Mirroring and Beli directly on your machine.
 
 ## Requirements
 
@@ -13,7 +15,22 @@ Auto Beli groups meal photos, matches them to nearby restaurants, and helps add 
   - Codex CLI 0.144.0 or newer, installed and signed in
   - An OpenRouter API key
 
-## Setup
+## Quick setup
+
+1. Clone the repository and run the setup script — it installs Node/pnpm, project dependencies, the Xcode command-line tools, walks you through the API keys above, and opens the two System Settings panes it needs permissions in.
+
+   ```bash
+   git clone <repository-url>
+   cd auto-beli
+   ./setup.sh
+   ```
+
+2. Grant the **Accessibility** and **Screen & System Audio Recording** permissions to your terminal app in the System Settings panes the script opens, then restart your terminal app.
+3. Run `pnpm dev` and open [http://localhost:3000](http://localhost:3000).
+
+The manual steps below are what `setup.sh` automates — use them if you'd rather do it by hand, or if the script gets stuck on something.
+
+## Manual setup
 
 1. Clone the repository.
 
@@ -77,7 +94,7 @@ Auto Beli groups meal photos, matches them to nearby restaurants, and helps add 
    xcode-select --install
    ```
 
-9. Give the terminal app that runs Auto Beli these macOS permissions:
+9. Give the terminal app that runs stuckwithfood these macOS permissions:
 
    - Open **System Settings → Privacy & Security**.
    - Enable **Accessibility**.

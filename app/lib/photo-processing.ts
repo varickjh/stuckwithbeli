@@ -120,6 +120,7 @@ async function readPhoto(
         path: string;
         size: number;
         takenAt: number | null;
+        url: string;
       }
     | { error?: string };
 
@@ -143,7 +144,9 @@ async function readPhoto(
     checksum,
     name: result.name,
     path: result.path,
-    url: URL.createObjectURL(displayBlob),
+    // A stable server URL (not a blob: URL) -- works across tabs, browsers,
+    // and reloads without needing to be reconstructed from stored bytes.
+    url: result.url,
     blob: displayBlob,
     mediaType: result.mediaType,
     size: result.size,
@@ -352,4 +355,13 @@ export function clusterCity(cluster: PhotoCluster) {
   }
 
   return null;
+}
+
+// Photos loaded from another browser/session only carry a stable server url,
+// not the in-memory Blob from this tab's own upload -- fetch it on demand.
+export async function getPhotoBlob(photo: Photo): Promise<Blob> {
+  if (photo.blob) return photo.blob;
+  const response = await fetch(photo.url);
+  if (!response.ok) throw new Error(`Could not load photo ${photo.name}`);
+  return response.blob();
 }

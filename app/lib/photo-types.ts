@@ -11,7 +11,7 @@ export type Photo = {
   name: string;
   path: string;
   url: string;
-  blob: Blob;
+  blob?: Blob;
   mediaType: string;
   size: number;
   previewable: boolean;
