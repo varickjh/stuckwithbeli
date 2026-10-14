@@ -61,9 +61,9 @@ export function OrganizerHeader({
             <Link
                 className="font-serif text-[clamp(28px,2.6vw,36px)] font-bold italic leading-none tracking-[-0.02em] text-accent-dark no-underline max-[680px]:col-start-2 max-[680px]:row-start-1 max-[680px]:text-[26px]"
                 href="/"
-                aria-label="stuckwithfood home"
+                aria-label="stuckwithbeli home"
             >
-                stuckwithfood
+                stuckwithbeli
             </Link>
 
             {unlabeledCount > 0 ? (

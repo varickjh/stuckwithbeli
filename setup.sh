@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sets up stuckwithfood on a fresh Mac: Node/pnpm, dependencies, .env.local,
+# Sets up stuckwithbeli on a fresh Mac: Node/pnpm, dependencies, .env.local,
 # Xcode command-line tools, and the macOS permissions the automation needs.
 # Safe to re-run — every step skips if it's already done.
 
@@ -16,7 +16,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
-bold "Setting up stuckwithfood"
+bold "Setting up stuckwithbeli"
 
 # --- Node.js -----------------------------------------------------------
 step "Checking Node.js"

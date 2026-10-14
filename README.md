@@ -1,6 +1,6 @@
-# stuckwithfood
+# stuckwithbeli
 
-stuckwithfood groups meal photos, matches them to nearby restaurants, and helps add them to Beli.
+stuckwithbeli groups meal photos, matches them to nearby restaurants, and helps add them to Beli.
 
 This only runs on a Mac with iPhone Mirroring set up against your own iPhone — there's no hosted or mobile-app version, since the automation drives iPhone Mirroring and Beli directly on your machine.
 
@@ -21,7 +21,7 @@ This only runs on a Mac with iPhone Mirroring set up against your own iPhone —
 
    ```bash
    git clone <repository-url>
-   cd auto-beli
+   cd stuckwithbeli
    ./setup.sh
    ```
 
@@ -36,7 +36,7 @@ The manual steps below are what `setup.sh` automates — use them if you'd rathe
 
    ```bash
    git clone <repository-url>
-   cd auto-beli
+   cd stuckwithbeli
    ```
 
 2. Install and select the correct Node.js version.
@@ -94,7 +94,7 @@ The manual steps below are what `setup.sh` automates — use them if you'd rathe
    xcode-select --install
    ```
 
-9. Give the terminal app that runs stuckwithfood these macOS permissions:
+9. Give the terminal app that runs stuckwithbeli these macOS permissions:
 
    - Open **System Settings → Privacy & Security**.
    - Enable **Accessibility**.

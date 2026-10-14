@@ -15,7 +15,7 @@ const openSans = Open_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "stuckwithfood",
+  title: "Stuck With Beli",
   description: "Organize food photos into location and time-based clusters.",
 };
 
