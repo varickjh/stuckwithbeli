@@ -320,8 +320,30 @@ export async function processFiles(
   );
 }
 
+// The earliest shot in the cluster, which is the meal's actual start -- not
+// the first photo in the array, since dragging photos between clusters can
+// leave that order out of step with time.
+export function clusterTakenAt(cluster: PhotoCluster) {
+  const timestamps = cluster.photos
+    .map((photo) => photo.takenAt)
+    .filter((value): value is number => value !== null);
+  if (!timestamps.length) return null;
+
+  return Math.min(...timestamps);
+}
+
+// Clusters still waiting on a label or a ranking come first so the work left
+// to do stays at the top, and each group runs newest meal to oldest. Undated
+// clusters sort to the end of their group rather than jumping the queue.
+export function sortClusters(clusters: PhotoCluster[]) {
+  return [...clusters].sort((a, b) => {
+    if (a.ranked !== b.ranked) return a.ranked ? 1 : -1;
+    return (clusterTakenAt(b) ?? -Infinity) - (clusterTakenAt(a) ?? -Infinity);
+  });
+}
+
 export function formatClusterDate(cluster: PhotoCluster) {
-  const timestamp = cluster.photos.find((photo) => photo.takenAt)?.takenAt;
+  const timestamp = clusterTakenAt(cluster);
   if (!timestamp) return "Date unavailable";
 
   return new Intl.DateTimeFormat(undefined, {

@@ -5,12 +5,13 @@ import type {
     DragEvent,
     MouseEvent as ReactMouseEvent,
 } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EmptyUpload } from "./components/empty-upload";
 import { OrganizerHeader } from "./components/organizer-header";
 import { PhotoClusterCard } from "./components/photo-cluster-card";
 import { PhotoContextMenu } from "./components/photo-context-menu";
+import { UndoToast } from "./components/undo-toast";
 import {
     type RankFeedback,
     type ScoreState,
@@ -23,6 +24,7 @@ import {
     clusterCity,
     getPhotoBlob,
     processFiles,
+    sortClusters,
 } from "./lib/photo-processing";
 import {
     clearBrowserData,
@@ -39,6 +41,7 @@ import {
 import { resizePhotosForLabeling } from "./lib/image-resize";
 import {
     PHOTO_DRAG_TYPE,
+    type Photo,
     type PhotoCluster,
     type PhotoContextMenuState,
 } from "./lib/photo-types";
@@ -54,8 +57,27 @@ import {
     type RestaurantSelection,
 } from "./lib/stack-schema";
 
+type QueueItem = { clusterId: string; feedback: RankFeedback | null };
+
+// Enough to rebuild the photo where it was, even if its whole meal went with
+// it: the photo, its meal as it stood (labels, category and ranked state
+// included), and both positions.
+type DeletedPhoto = {
+    photo: Photo;
+    cluster: PhotoCluster;
+    photoIndex: number;
+    clusterIndex: number;
+};
+
+const UNDO_WINDOW_MS = 8_000;
+const MAX_UNDO_STACK = 10;
+
 export default function Home() {
     const [clusters, setClusters] = useState<PhotoCluster[]>([]);
+    const [deletedPhotos, setDeletedPhotos] = useState<DeletedPhoto[]>([]);
+    // Display order only -- `clusters` stays in its original order so photo
+    // moves, labeling and persistence keep working off a stable list.
+    const sortedClusters = useMemo(() => sortClusters(clusters), [clusters]);
     const [processing, setProcessing] = useState(false);
     const [labeling, setLabeling] = useState(false);
     const [hydrated, setHydrated] = useState(false);
@@ -77,6 +99,16 @@ export default function Home() {
     }>({ entries: {}, syncedAt: null });
     const [ratingsDictionaryOpen, setRatingsDictionaryOpen] = useState(false);
     const [scoreState, setScoreState] = useState<ScoreState>({ status: "idle" });
+    const [batchMode, setBatchMode] = useState(false);
+    const [batchSelection, setBatchSelection] = useState<Set<string>>(new Set());
+    const [rankingQueue, setRankingQueue] = useState<QueueItem[] | null>(null);
+    const [rankingQueueIndex, setRankingQueueIndex] = useState(0);
+    const [rankingQueueRunning, setRankingQueueRunning] = useState(false);
+    // Beli's own finish flow already navigates back to the search-a-
+    // restaurant screen, so the next run (queued or a fresh single "Rank"
+    // click right after) can skip reopening the app from scratch. Reset on
+    // error/cancel since we can no longer be sure where the app landed.
+    const [beliAtSearchScreen, setBeliAtSearchScreen] = useState(false);
     const rankingSessionId = rankingProgress?.id ?? null;
     const rankingSessionState = rankingProgress?.state ?? null;
     const inputRef = useRef<HTMLInputElement>(null);
@@ -127,6 +159,14 @@ export default function Home() {
                 console.error("Could not restore saved ratings", error),
             );
     }, []);
+
+    // Undo is offered for a short window after the latest delete; every new
+    // delete restarts it.
+    useEffect(() => {
+        if (!deletedPhotos.length) return;
+        const timer = window.setTimeout(() => setDeletedPhotos([]), UNDO_WINDOW_MS);
+        return () => window.clearTimeout(timer);
+    }, [deletedPhotos]);
 
     useEffect(() => {
         if (!hydrated) return;
@@ -180,6 +220,14 @@ export default function Home() {
             window.clearInterval(interval);
         };
     }, [rankingSessionId, rankingSessionState]);
+
+    useEffect(() => {
+        if (rankingSessionState === "complete") {
+            setBeliAtSearchScreen(true);
+        } else if (rankingSessionState === "error" || rankingSessionState === "cancelled") {
+            setBeliAtSearchScreen(false);
+        }
+    }, [rankingSessionState]);
 
     const chooseFiles = () => inputRef.current?.click();
 
@@ -272,6 +320,19 @@ export default function Home() {
     };
 
     const deletePhoto = (photoId: string) => {
+        const clusterIndex = clusters.findIndex((cluster) =>
+            cluster.photos.some((photo) => photo.id === photoId),
+        );
+        if (clusterIndex === -1) return;
+        const cluster = clusters[clusterIndex];
+        const photoIndex = cluster.photos.findIndex((photo) => photo.id === photoId);
+        setDeletedPhotos((current) =>
+            [
+                ...current,
+                { photo: cluster.photos[photoIndex], cluster, photoIndex, clusterIndex },
+            ].slice(-MAX_UNDO_STACK),
+        );
+
         setClusters((current) =>
             current
                 .map((cluster) => ({
@@ -280,6 +341,37 @@ export default function Home() {
                 }))
                 .filter((cluster) => cluster.photos.length > 0),
         );
+    };
+
+    // Deleting only drops the photo from the list -- its file stays on the
+    // server -- so undoing is just putting it back, most recent delete first.
+    const undoDeletePhoto = () => {
+        const last = deletedPhotos[deletedPhotos.length - 1];
+        if (!last) return;
+        setDeletedPhotos((current) => current.slice(0, -1));
+
+        setClusters((current) => {
+            const alreadyBack = current.some((cluster) =>
+                cluster.photos.some((photo) => photo.id === last.photo.id),
+            );
+            if (alreadyBack) return current;
+
+            const target = current.find((cluster) => cluster.id === last.cluster.id);
+            if (target) {
+                const photos = [...target.photos];
+                photos.splice(Math.min(last.photoIndex, photos.length), 0, last.photo);
+                return current.map((cluster) =>
+                    cluster.id === target.id ? { ...cluster, photos } : cluster,
+                );
+            }
+
+            // The meal went away with its last photo (or later lost its other
+            // photos), so bring it back as it was, holding just this photo.
+            const restored = { ...last.cluster, photos: [last.photo] };
+            const next = [...current];
+            next.splice(Math.min(last.clusterIndex, next.length), 0, restored);
+            return next;
+        });
     };
 
     const splitIntoSeparateMeal = (clusterId: string, photoId: string) => {
@@ -335,6 +427,7 @@ export default function Home() {
     const clearAll = () => {
         if (!window.confirm("Clear all photos, labels, and saved progress?")) return;
         setClusters([]);
+        setDeletedPhotos([]);
         setMessage("Drop photos or a zip anywhere");
         void clearServerData().catch((error) =>
             console.error("Could not clear saved progress", error),
@@ -508,11 +601,14 @@ export default function Home() {
         }
     };
 
-    const continueRanking = async (feedback: RankFeedback) => {
-        if (!rankingClusterId || rankingLaunching) return;
-        const cluster = clusters.find((item) => item.id === rankingClusterId);
-        if (!cluster || !feedback.rating) return;
+    const launchRanking = async (
+        cluster: PhotoCluster,
+        feedback: RankFeedback,
+    ): Promise<boolean> => {
+        if (!feedback.rating) return false;
         setRankingLaunching(true);
+        const skipToSearch = beliAtSearchScreen;
+        setBeliAtSearchScreen(false);
 
         try {
             const selectedCandidate = cluster.match?.candidates.find(
@@ -551,6 +647,9 @@ export default function Home() {
             if (feedback.score !== null) {
                 formData.set("computedScore", String(feedback.score));
             }
+            if (skipToSearch) {
+                formData.set("startStep", "find_restaurant");
+            }
             for (const photo of cluster.photos) {
                 formData.append("photos", await getPhotoBlob(photo), photo.name);
             }
@@ -567,19 +666,103 @@ export default function Home() {
                         ? result.error ?? "Could not open ranking workspace"
                         : "Could not open ranking workspace",
                 );
-                return;
+                return false;
             }
             setRankingProgress(result as RankingSessionStatus);
+            return true;
         } catch (error) {
             window.alert(
                 error instanceof Error
                     ? error.message
                     : "Could not open ranking workspace",
             );
+            return false;
         } finally {
             setRankingLaunching(false);
         }
     };
+
+    // In queue mode, "Continue" on the form doesn't launch anything -- it
+    // just banks the feedback for that restaurant and advances to the next
+    // one's form. Only once every queued restaurant's feedback is collected
+    // does the last "Continue" (labeled "Start ranking all") actually fire
+    // the first automation run; the rest follow on their own via the
+    // auto-advance effect below.
+    const continueRanking = async (feedback: RankFeedback) => {
+        if (!rankingClusterId || rankingLaunching) return;
+
+        if (rankingQueue) {
+            const updatedQueue = rankingQueue.map((item, index) =>
+                index === rankingQueueIndex ? { ...item, feedback } : item,
+            );
+            setRankingQueue(updatedQueue);
+
+            const nextIndex = rankingQueueIndex + 1;
+            if (nextIndex < updatedQueue.length) {
+                setRankingQueueIndex(nextIndex);
+                setRankingProgress(null);
+                setScoreState({ status: "idle" });
+                setRankingClusterId(updatedQueue[nextIndex].clusterId);
+                return;
+            }
+
+            const first = updatedQueue[0];
+            const firstCluster = clusters.find((item) => item.id === first.clusterId);
+            if (!firstCluster || !first.feedback) return;
+            setRankingQueueRunning(true);
+            setRankingQueueIndex(0);
+            setRankingClusterId(first.clusterId);
+            await launchRanking(firstCluster, first.feedback);
+            return;
+        }
+
+        const cluster = clusters.find((item) => item.id === rankingClusterId);
+        if (!cluster) return;
+        await launchRanking(cluster, feedback);
+    };
+
+    // Drives the "continuous" part of the queue: once a queued restaurant
+    // finishes, mark it ranked and automatically launch the next one --
+    // no manual "Done" click needed until the very last restaurant, where
+    // this stops and leaves the normal finish screen for the user to close.
+    useEffect(() => {
+        if (!rankingQueue || !rankingQueueRunning) return;
+        if (rankingProgress?.state !== "complete") return;
+
+        const current = rankingQueue[rankingQueueIndex];
+        setClusters((currentClusters) =>
+            currentClusters.map((cluster) =>
+                cluster.id === current.clusterId
+                    ? { ...cluster, ranked: true }
+                    : cluster,
+            ),
+        );
+
+        const nextIndex = rankingQueueIndex + 1;
+        if (nextIndex >= rankingQueue.length) return;
+
+        const timer = window.setTimeout(() => {
+            const nextItem = rankingQueue[nextIndex];
+            const nextCluster = clusters.find(
+                (item) => item.id === nextItem.clusterId,
+            );
+            setRankingQueueIndex(nextIndex);
+            setRankingClusterId(nextItem.clusterId);
+            // Clear the previous restaurant's now-stale "complete" status
+            // before switching the overlay to the next restaurant's name --
+            // otherwise it briefly renders "Ranked! {next restaurant}" for
+            // a restaurant that hasn't actually run yet, until the fetch
+            // below resolves and replaces it with the real running status.
+            setRankingProgress(null);
+            setScoreState({ status: "idle" });
+            if (nextCluster && nextItem.feedback) {
+                void launchRanking(nextCluster, nextItem.feedback);
+            }
+        }, 1500);
+
+        return () => window.clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rankingQueue, rankingQueueRunning, rankingQueueIndex, rankingProgress?.state]);
 
     const retryRanking = async (step: RankingStepId) => {
         if (!rankingProgress || rankingLaunching) return;
@@ -787,6 +970,9 @@ export default function Home() {
         setRankingClusterId(null);
         setRankingProgress(null);
         setScoreState({ status: "idle" });
+        setRankingQueue(null);
+        setRankingQueueIndex(0);
+        setRankingQueueRunning(false);
     };
 
     const cancelRanking = async () => {
@@ -892,10 +1078,24 @@ export default function Home() {
                                 </p>
                             ) : null}
                         </div>
+                        <button
+                            className={
+                                batchMode
+                                    ? "rounded-full bg-accent px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent/85"
+                                    : "rounded-full bg-card-2 px-5 py-2.5 text-sm font-bold text-ink transition-colors hover:bg-divider"
+                            }
+                            type="button"
+                            onClick={() => {
+                                setBatchMode((current) => !current);
+                                setBatchSelection(new Set());
+                            }}
+                        >
+                            {batchMode ? "Cancel batch" : "Rank multiple"}
+                        </button>
                     </div>
 
                     <div className="grid grid-cols-1 items-stretch gap-6 md:grid-cols-2 lg:grid-cols-3">
-                        {clusters.map((cluster) => (
+                        {sortedClusters.map((cluster) => (
                             <PhotoClusterCard
                                 key={cluster.id}
                                 cluster={cluster}
@@ -923,6 +1123,19 @@ export default function Home() {
                                     setRankingProgress(null);
                                     setScoreState({ status: "idle" });
                                     setRankingClusterId(clusterId);
+                                }}
+                                batchMode={batchMode}
+                                batchSelected={batchSelection.has(cluster.id)}
+                                onToggleBatch={(clusterId) => {
+                                    setBatchSelection((current) => {
+                                        const next = new Set(current);
+                                        if (next.has(clusterId)) {
+                                            next.delete(clusterId);
+                                        } else {
+                                            next.add(clusterId);
+                                        }
+                                        return next;
+                                    });
                                 }}
                             />
                         ))}
@@ -960,6 +1173,51 @@ export default function Home() {
                     </div>
                 </div>
             ) : null}
+
+            {deletedPhotos.length > 0 ? (
+                <UndoToast
+                    message={
+                        deletedPhotos.length === 1
+                            ? "Photo deleted"
+                            : `${deletedPhotos.length} photos deleted`
+                    }
+                    onUndo={undoDeletePhoto}
+                />
+            ) : null}
+
+            {batchMode && batchSelection.size > 0 ? (
+                <div className="pointer-events-none fixed inset-x-0 bottom-8 z-40 flex justify-center">
+                    <div className="pointer-events-auto flex items-center gap-4 rounded-full bg-ink px-6 py-3.5 text-white shadow-lg">
+                        <span className="text-sm font-semibold">
+                            {batchSelection.size} restaurant
+                            {batchSelection.size === 1 ? "" : "s"} selected
+                        </span>
+                        <button
+                            className="rounded-full bg-accent px-5 py-2.5 text-sm font-bold text-white transition-colors hover:bg-accent/85"
+                            type="button"
+                            onClick={() => {
+                                const queue: QueueItem[] = sortedClusters
+                                    .filter((cluster) => batchSelection.has(cluster.id))
+                                    .map((cluster) => ({
+                                        clusterId: cluster.id,
+                                        feedback: null,
+                                    }));
+                                if (!queue.length) return;
+                                setRankingQueue(queue);
+                                setRankingQueueIndex(0);
+                                setRankingQueueRunning(false);
+                                setRankingProgress(null);
+                                setScoreState({ status: "idle" });
+                                setRankingClusterId(queue[0].clusterId);
+                                setBatchMode(false);
+                                setBatchSelection(new Set());
+                            }}
+                        >
+                            Enter details for {batchSelection.size}
+                        </button>
+                    </div>
+                </div>
+            ) : null}
             </main>
 
             {ratingsDictionaryOpen ? (
@@ -980,6 +1238,11 @@ export default function Home() {
 
             {rankingCluster ? (
                 <RankingOverlay
+                    // Remount per restaurant so the review box, rating, score
+                    // and photo descriptions start empty for each one -- in a
+                    // queue the overlay otherwise stays mounted and carries the
+                    // previous restaurant's answers into the next form.
+                    key={rankingCluster.id}
                     restaurantName={
                         rankingCluster.selection?.name ??
                         rankingCluster.match?.selected?.name ??
@@ -989,6 +1252,19 @@ export default function Home() {
                     launching={rankingLaunching}
                     progress={rankingProgress}
                     scoreState={scoreState}
+                    queuePosition={
+                        rankingQueue
+                            ? { index: rankingQueueIndex + 1, total: rankingQueue.length }
+                            : null
+                    }
+                    initialFeedback={rankingQueue?.[rankingQueueIndex]?.feedback ?? null}
+                    continueLabel={
+                        rankingQueue && !rankingQueueRunning
+                            ? rankingQueueIndex === rankingQueue.length - 1
+                                ? `Start ranking ${rankingQueue.length}`
+                                : "Save & next restaurant"
+                            : undefined
+                    }
                     onComputeScore={(input) => void computeScore(input)}
                     onCancel={closeRanking}
                     onCancelProcess={() => void cancelRanking()}

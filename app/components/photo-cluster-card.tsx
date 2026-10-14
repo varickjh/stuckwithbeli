@@ -39,6 +39,9 @@ type PhotoClusterCardProps = {
     labeling: boolean;
     onLabel: (clusterId: string) => void;
     onOpenRanking: (clusterId: string) => void;
+    batchMode: boolean;
+    batchSelected: boolean;
+    onToggleBatch: (clusterId: string) => void;
 };
 
 function isPhotoDrag(event: DragEvent<HTMLElement>) {
@@ -61,6 +64,9 @@ export function PhotoClusterCard({
     labeling,
     onLabel,
     onOpenRanking,
+    batchMode,
+    batchSelected,
+    onToggleBatch,
 }: PhotoClusterCardProps) {
     const stackPhotos = cluster.photos.slice(0, 3);
     const candidates = cluster.match?.candidates ?? [];
@@ -289,7 +295,17 @@ export function PhotoClusterCard({
                 </button>
             ) : null}
 
-            {cluster.match ? (
+            {cluster.match && batchMode && !cluster.ranked ? (
+                <label className="flex cursor-pointer select-none items-center gap-2 rounded-full bg-card-2 px-3 py-2.5 text-sm font-bold text-ink">
+                    <input
+                        className="size-4 accent-accent"
+                        type="checkbox"
+                        checked={batchSelected}
+                        onChange={() => onToggleBatch(cluster.id)}
+                    />
+                    Include in batch
+                </label>
+            ) : cluster.match ? (
                 <button
                     className={
                         cluster.ranked

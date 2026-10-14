@@ -29,6 +29,14 @@ type RankingOverlayProps = {
     launching: boolean;
     progress: RankingSessionStatus | null;
     scoreState: ScoreState;
+    queuePosition?: { index: number; total: number } | null;
+    // What was already submitted for this restaurant, when the overlay mounts
+    // for a run that is already queued or running (a batch). The form state
+    // below is local to the overlay and it remounts per restaurant, so without
+    // this the dish names, rating and review read as blank while the run is
+    // typing the real ones into Beli.
+    initialFeedback?: RankFeedback | null;
+    continueLabel?: string;
     onComputeScore: (input: {
         rating: RankFeedback["rating"];
         text: string;
@@ -96,6 +104,9 @@ export function RankingOverlay({
     launching,
     progress,
     scoreState,
+    queuePosition = null,
+    initialFeedback = null,
+    continueLabel,
     onComputeScore,
     onCancel,
     onCancelProcess,
@@ -108,13 +119,25 @@ export function RankingOverlay({
     onSkipPhotos,
     onFinished,
 }: RankingOverlayProps) {
-    const [rating, setRating] = useState<RankFeedback["rating"]>(null);
-    const [description, setDescription] = useState("");
+    const [rating, setRating] = useState<RankFeedback["rating"]>(
+        initialFeedback?.rating ?? null,
+    );
+    const [description, setDescription] = useState(initialFeedback?.description ?? "");
     const [reviewSource, setReviewSource] = useState<"typed" | "voice">("typed");
-    const [editableScore, setEditableScore] = useState<number | null>(null);
+    const [editableScore, setEditableScore] = useState<number | null>(
+        initialFeedback?.score ?? null,
+    );
     const [recording, setRecording] = useState(false);
+    // Submitted descriptions are stored in photo order, so key them back to
+    // photo ids here.
     const [photoDescriptions, setPhotoDescriptions] = useState<Record<string, string>>(
-        {},
+        () =>
+            Object.fromEntries(
+                photos.flatMap((photo, index) => {
+                    const value = initialFeedback?.photoDescriptions[index];
+                    return value ? [[photo.id, value]] : [];
+                }),
+            ),
     );
     const dialogRef = useRef<HTMLDivElement>(null);
     const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -172,6 +195,13 @@ export function RankingOverlay({
             window.removeEventListener("keydown", closeOnEscape);
         };
     }, [onCancel, progress?.state]);
+
+    // The overlay is remounted for each restaurant in a queue, so a dictation
+    // left running would otherwise keep the microphone open against a form
+    // that no longer exists.
+    useEffect(() => {
+        return () => recognitionRef.current?.stop();
+    }, []);
 
     const showingProgress = progress !== null;
     const completed = progress?.state === "complete";
@@ -259,6 +289,11 @@ export function RankingOverlay({
                     </div>
                 ) : showingProgress ? (
                     <div className="flex min-h-full flex-col" aria-live="polite">
+                        {queuePosition ? (
+                            <p className="m-0 text-xs font-bold uppercase tracking-wide text-muted">
+                                Restaurant {queuePosition.index} of {queuePosition.total}
+                            </p>
+                        ) : null}
                         <h2
                             className="m-0 font-serif text-3xl font-bold text-accent-dark sm:text-4xl"
                             id="ranking-title"
@@ -437,6 +472,11 @@ export function RankingOverlay({
                     </div>
                 ) : (
                     <>
+                        {queuePosition ? (
+                            <p className="m-0 text-xs font-bold uppercase tracking-wide text-muted">
+                                Restaurant {queuePosition.index} of {queuePosition.total}
+                            </p>
+                        ) : null}
                         <h2
                             className="m-0 font-serif text-3xl font-bold text-accent-dark sm:text-4xl"
                             id="ranking-title"
@@ -566,7 +606,9 @@ export function RankingOverlay({
                             >
                                 {scoreState.status === "loading"
                                     ? "Computing score…"
-                                    : "Continue"}
+                                    : scoreState.status !== "ready"
+                                      ? "Compute score"
+                                      : (continueLabel ?? "Continue")}
                             </button>
                         </div>
                     </>
