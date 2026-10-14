@@ -107,6 +107,18 @@ private final class BeliAutomation {
     private let capture: StreamingPhoneScreenshot
     private let visionQueue = DispatchQueue(label: "auto-beli.vision")
     private let eventSource = CGEventSource(stateID: .hidSystemState)
+    private var reportedWindowMove = false
+
+    // How close a feature-print distance must be to call a thumbnail "this photo".
+    // Measured live: clear genuine matches 0.74-0.83, but a genuine photo in the
+    // picker's bottom row reads 0.91+ because the date-search bar covers part of
+    // its cell; unrelated photos 1.1+; and a sibling dish photographed at the
+    // same table 0.91-0.96. The last two overlap, so no cutoff separates them --
+    // tightening it would reject real photos. Protection is structural instead:
+    // a click TOGGLES a photo, so a cell is never clicked twice on a page
+    // (see selectPhotos), and the description step checks every photo made it
+    // into Beli's list.
+    private static let photoMatchCutoff: Float = 0.95
 
     init(configuration: AutomationConfiguration, startStep: String) async throws {
         self.configuration = configuration
@@ -119,6 +131,31 @@ private final class BeliAutomation {
     }
 
     func run() async throws {
+        do {
+            try await runSteps()
+        } catch {
+            await recordFailure(error)
+            throw error
+        }
+    }
+
+    // Only the photo step used to keep a frame when it failed, so most failures
+    // left nothing to look at. Keep the last frame and the text on it for any of
+    // them; the text goes to the server log next to the other diagnostics.
+    private func recordFailure(_ error: Error) async {
+        guard let image = try? await capture.image() else { return }
+        saveDebugImage(image, named: "failure-latest.png")
+        let seen = ((try? recognizeText(in: image)) ?? [])
+            .map { "\"\($0.text)\"@\(String(format: "%.2f", $0.center.y))" }
+            .joined(separator: ", ")
+        emit(
+            type: "diagnostic",
+            step: nil,
+            message: "failed: \(error.localizedDescription) | screen text: \(seen)"
+        )
+    }
+
+    private func runSteps() async throws {
         if startStep == "skip_photos" {
             try await skipPhotos()
             try await finishingInBeli()
@@ -159,7 +196,12 @@ private final class BeliAutomation {
 
     private func findingRestaurant() async throws {
         start("find_restaurant")
-        let search = try await waitForText("search a restaurant", timeout: 30)
+        // Beli has reworded this box more than once ("Search a restaurant",
+        // "Search restaurant, cuisine, occasion", now "Search a restaurant,
+        // member, etc."), so no phrase here has stayed true. What has kept
+        // working is the bottom "Search" tab, which opens the same screen --
+        // so aim at that on purpose instead of by way of a partial match.
+        let search = try await waitForText("search", timeout: 30) { $0.center.y > 0.85 }
         try await clickDetectedTarget(search.center)
         try await pause(1.1)
         try typeText("\(configuration.restaurantName) \(configuration.address)")
@@ -169,37 +211,45 @@ private final class BeliAutomation {
         let resultPredicate: (OCRItem) -> Bool = { item in
             item.center.y > currentLocation.center.y + 0.025
         }
-        let result = try await waitForText(prefix, timeout: 45, predicate: resultPredicate)
+        let firstResult = try await waitForText(prefix, timeout: 45, predicate: resultPredicate)
         emit(
             type: "diagnostic",
             step: "find_restaurant",
-            message: "search result \"\(result.text)\" found at \(result.center), tapping"
+            message: "search result \"\(firstResult.text)\" found at \(firstResult.center), tapping"
         )
         // Tap the restaurant NAME (not the row's own "+"/bookmark icons,
-        // which are a different action -- confirmed live) to open its
-        // profile page, where start_rating finds the teal rating button.
-        // A single tap silently failed to register here too (same class of
-        // issue found elsewhere in this flow) -- double-tap instead. But
-        // results can still be settling/reflowing (network-fetched
-        // autocomplete) when the first read finds them, so this re-locates
-        // the row right before the second tap instead of reusing a
-        // position that may have already scrolled away underneath it.
-        try await pause(0.25)
-        click(result.center)
-        try await pause(1)
-        if let resettled = try await findText(prefix, timeout: 2, predicate: resultPredicate) {
-            if distance(resettled.center, result.center) > 0.02 {
+        // which are a different action) to open its profile page. A blind
+        // tap here doesn't reliably register or land correctly even with a
+        // fixed double-tap (confirmed live -- this is the *same* code path
+        // on both a working and a failing run, so it isn't a timing fluke
+        // that a longer pause fixes). Retry against a freshly re-located row
+        // each attempt, and confirm the profile page actually opened -- its
+        // own teal rating button is visible, the same one start_rating looks
+        // for -- before moving on, instead of trusting a fixed tap count.
+        try click(firstResult.center)
+        try await pause(0.9)
+        var opened = false
+        for _ in 0..<5 {
+            if Self.findTealCircle(in: try await capture.image()) != nil {
+                opened = true
+                break
+            }
+            if let result = try await findText(prefix, timeout: 3, predicate: resultPredicate) {
                 emit(
                     type: "diagnostic",
                     step: "find_restaurant",
-                    message: "search result moved to \(resettled.center) before second tap, retargeting"
+                    message: "still on search results, retrying tap at \(result.center)"
                 )
+                try click(result.center)
             }
-            click(resettled.center)
-        } else {
-            click(result.center)
+            try await pause(0.9)
         }
-        try await pause(1.5)
+        if !opened {
+            opened = Self.findTealCircle(in: try await capture.image()) != nil
+        }
+        guard opened else {
+            throw AutomationFailure.message("Tapping the restaurant did not open its profile page.")
+        }
         finish("find_restaurant")
     }
 
@@ -248,7 +298,7 @@ private final class BeliAutomation {
                     step: "finish_in_beli",
                     message: "Duel \(duelCount): could not read opponent score or no computed score, used Too tough"
                 )
-                try await pause(0.9)
+                try await pause(0.6)
                 continue
             }
 
@@ -261,7 +311,7 @@ private final class BeliAutomation {
                 step: "finish_in_beli",
                 message: "Duel \(duelCount): opponent \(opponentScore), computed \(computedScore), chose \(chooseNew ? "new restaurant" : "opponent")"
             )
-            try await pause(0.9)
+            try await pause(0.6)
         }
 
         if duelCount >= 60 {
@@ -271,13 +321,60 @@ private final class BeliAutomation {
 
     private func startingRating() async throws {
         start("start_rating")
-        let image = try await capture.image()
-        guard let plusPoint = Self.findTealCircle(in: image) else {
-            saveTealDebugImage(image)
+        // The restaurant page loads a map and network data before this button
+        // renders -- a single capture right after navigating can land mid-load
+        // and see no teal ring at all, not because the detector is wrong but
+        // because the button genuinely isn't drawn yet. Poll instead of
+        // gambling on one fixed settle pause being long enough.
+        var plusPoint: CGPoint?
+        var lastImage: CGImage?
+        let deadline = Date().addingTimeInterval(10)
+        while plusPoint == nil && Date() < deadline {
+            let image = try await capture.image()
+            lastImage = image
+            plusPoint = Self.findTealCircle(in: image)
+            if plusPoint == nil { try await pause(0.3) }
+        }
+        guard let plusPoint else {
+            if let lastImage { saveTealDebugImage(lastImage) }
             throw AutomationFailure.message("The teal rating button could not be found.")
         }
-        try await clickThroughScreenshot(plusPoint)
-        try await pause(1)
+        // Tap once and check the rating sheet's own header, tapping again only if it
+        // didn't open. This used to be a blind double-tap (tap, wait, tap at the
+        // same spot), a workaround from when first taps were swallowed by a window
+        // that wasn't active yet. Now that the phone is raised before each click,
+        // the first tap lands -- and a second one then hits the sheet it just
+        // opened, or the page while the sheet is still sliding in.
+        var sheetOpened = false
+        for attempt in 1...3 {
+            try click(plusPoint)
+            try await pause(0.4)
+            if try await findText("how was it", timeout: 3) != nil {
+                sheetOpened = true
+                break
+            }
+            // Keep what the tap did, so "nothing opened" can be told apart from
+            // "something else opened" (a menu, a prompt) without guessing.
+            if let image = try? await capture.image() {
+                saveDebugImage(image, named: "rating-tap-\(attempt).png")
+                let seen = ((try? recognizeText(in: image)) ?? [])
+                    .filter { $0.text.count > 2 }
+                    .prefix(40)
+                    .map { "\"\($0.text)\"@\(String(format: "%.2f", $0.center.y))" }
+                    .joined(separator: ", ")
+                emit(
+                    type: "diagnostic",
+                    step: "start_rating",
+                    message: "rating sheet not open after tap \(attempt) at (\(String(format: "%.3f", plusPoint.x)), \(String(format: "%.3f", plusPoint.y))); screen text: \(seen)"
+                )
+            }
+        }
+        guard sheetOpened else {
+            throw AutomationFailure.message(
+                "The rating sheet did not open after clicking where the + button is. "
+                    + "Check that the pointer actually reached the button, then retry."
+            )
+        }
         finish("start_rating")
     }
 
@@ -309,17 +406,63 @@ private final class BeliAutomation {
         start("add_notes")
         if !configuration.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let addNotes = try await waitForText("add notes", timeout: 20)
-            try await clickDetectedTarget(addNotes.center)
-            let textArea = try await waitForText("tips, tricks", timeout: 20)
+            // Tap, then wait for the sheet's own placeholder; if it never appears the
+            // tap didn't open it, so tap again rather than type into the page behind.
+            var openedArea: OCRItem?
+            for _ in 0..<3 {
+                try await clickDetectedTarget(addNotes.center)
+                if let found = try await findText("tips, tricks", timeout: 5) {
+                    openedArea = found
+                    break
+                }
+            }
+            guard let textArea = openedArea else {
+                throw AutomationFailure.message("Could not open the notes editor.")
+            }
             // A single tap silently failed to focus small targets elsewhere
             // in this flow (confirmed live) -- use the same double-tap
             // workaround already established for the teal button.
-            try await clickThroughScreenshot(textArea.center)
-            try typeText(configuration.description)
             // Verify the placeholder actually disappeared (i.e. the field
             // received the text) before tapping Done -- a focus click that
-            // silently failed would otherwise leave the note empty.
-            if try await findText("tips, tricks", timeout: 2) != nil {
+            // silently failed would otherwise leave the note empty. The
+            // placeholder only shows while the field is empty, so when it is
+            // still there nothing was typed and trying again can't double up.
+            var noteTyped = false
+            for attempt in 1...3 {
+                // Vary where the field is tapped. The placeholder is a label sitting on
+                // top of the text view, and a retry that taps the very same spot fails
+                // the very same way (seen live: three identical attempts, three
+                // misses). The blank area below the label belongs to the text view.
+                let tapPoint: CGPoint
+                switch attempt {
+                case 1: tapPoint = textArea.center
+                case 2: tapPoint = CGPoint(x: 0.5, y: min(0.9, textArea.center.y + 0.12))
+                default: tapPoint = CGPoint(x: 0.3, y: min(0.9, textArea.center.y + 0.28))
+                }
+                try await clickThroughScreenshot(tapPoint)
+                try typeText(configuration.description)
+                if try await findText("tips, tricks", timeout: 2) == nil {
+                    noteTyped = true
+                    break
+                }
+                // Keep what the screen showed, so "typed into the wrong place", "the
+                // sheet closed" and "the keyboard never came up" can be told apart.
+                var seen = ""
+                if let image = try? await capture.image() {
+                    saveDebugImage(image, named: "notes-attempt-\(attempt).png")
+                    seen = ((try? recognizeText(in: image)) ?? [])
+                        .filter { $0.text.count > 1 }
+                        .prefix(30)
+                        .map { "\"\($0.text)\"@\(String(format: "%.2f", $0.center.y))" }
+                        .joined(separator: ", ")
+                }
+                emit(
+                    type: "diagnostic",
+                    step: "add_notes",
+                    message: "notes: field still empty after typing (attempt \(attempt) of 3); screen text: \(seen)"
+                )
+            }
+            guard noteTyped else {
                 throw AutomationFailure.message("The notes field did not receive the typed text.")
             }
             let done = try await waitForText("done", timeout: 15) { $0.center.y < 0.18 }
@@ -329,7 +472,7 @@ private final class BeliAutomation {
             var closed = false
             for _ in 0..<5 {
                 try await clickDetectedTarget(done.center)
-                try await pause(0.6)
+                try await pause(0.4)
                 if try await findText("your notes", timeout: 2, predicate: { $0.center.y < 0.18 }) == nil {
                     closed = true
                     break
@@ -385,7 +528,21 @@ private final class BeliAutomation {
         start("add_photos")
         let addPhotos = try await waitForText("add photos", timeout: 20)
         try await clickDetectedTarget(addPhotos.center)
-        try await pause(1.0)
+        try await pause(0.6)
+
+        // Clear leftovers BEFORE the date search, not just after it. The system
+        // picker keeps its selection across re-presenting in the same session,
+        // so in a queue it reopens with the previous restaurant's photos still
+        // checked -- and those are from a different visit date, so once the
+        // search below jumps to this visit's day they're scrolled out of view
+        // and the pass inside selectPhotos() (which only ever looks at the
+        // visible page) can't see them. They then ride along into Beli's Photo
+        // Upload list as extra rows, which both attaches the wrong photo and
+        // leaves more rows than this run has descriptions for, so filling them
+        // fails partway and nothing gets saved. Right here the picker is still
+        // showing where the previous run left it, which is where those stale
+        // selections actually are.
+        try await clearStaleSelections()
 
         // No "Beli" album navigation needed -- selectPhotos() already finds
         // target photos by visual pixel-signature matching while scrolling
@@ -397,45 +554,65 @@ private final class BeliAutomation {
         // has to look through far fewer candidates.
         if let dateQuery = Self.dateFormatter.date(from: configuration.visitDate).map(Self.searchDateFormatter.string(from:)) {
             do {
-                // The search icon is a TOGGLE (tap again closes it) -- unlike
-                // the idempotent buttons elsewhere, a blind double-tap here
-                // re-closes it (confirmed live). Single-tap, then verify it
-                // actually opened before proceeding, retrying only if it
-                // didn't.
-                var searchOpened = false
-                for _ in 0..<3 {
-                    try await clickDetectedTarget(CGPoint(x: 0.86, y: 0.94))
-                    try await pause(0.5)
-                    if try await findText("search your library", timeout: 2) != nil {
-                        searchOpened = true
+                var tappedSuggestion = false
+                for attempt in 1...3 {
+                    // The search icon is a TOGGLE (tap again closes it) -- unlike
+                    // the idempotent buttons elsewhere, a blind double-tap here
+                    // re-closes it (confirmed live). Single-tap, then verify it
+                    // actually opened before proceeding, retrying only if it
+                    // didn't. Seeing the empty field's placeholder also proves the
+                    // date is typed into a clean field, not on top of leftover text.
+                    var searchOpened = false
+                    for _ in 0..<3 {
+                        try await clickDetectedTarget(CGPoint(x: 0.86, y: 0.94))
+                        try await pause(0.4)
+                        if try await findText("search your library", timeout: 2) != nil {
+                            searchOpened = true
+                            break
+                        }
+                    }
+                    guard searchOpened else {
+                        throw AutomationFailure.message("Could not open photo search.")
+                    }
+                    let searchField = try await waitForText("search your library", timeout: 5)
+                    try await clickDetectedTarget(searchField.center)
+                    try typeText(dateQuery)
+
+                    // The date suggestion chip can take a moment to populate
+                    // after typing finishes (Photos indexes it locally), so
+                    // this waits for it rather than doing one quick look and
+                    // silently moving on -- without tapping it, the search
+                    // never actually boosts that day's photos.
+                    if let suggestion = try await waitForDateChip(dateQuery, timeout: 8) {
+                        try await clickDetectedTarget(suggestion.center)
+                        try await pause(0.4)
+                        emit(
+                            type: "diagnostic",
+                            step: "add_photos",
+                            message: "date search: tapped suggestion \"\(suggestion.text)\""
+                        )
+                        tappedSuggestion = true
                         break
                     }
-                }
-                guard searchOpened else {
-                    throw AutomationFailure.message("Could not open photo search.")
-                }
-                let searchField = try await waitForText("search your library", timeout: 5)
-                try await clickDetectedTarget(searchField.center)
-                try typeText(dateQuery)
-                // The date suggestion chip can take a moment to populate
-                // after typing finishes (Photos indexes it locally), so
-                // this waits for it rather than doing one quick look and
-                // silently moving on -- without tapping it, the search
-                // never actually boosts that day's photos, and previously
-                // that failure was invisible.
-                if let suggestion = try await findText(dateQuery, timeout: 8, predicate: { $0.center.y < 0.9 }) {
-                    try await clickDetectedTarget(suggestion.center)
-                    try await pause(0.6)
+
                     emit(
                         type: "diagnostic",
                         step: "add_photos",
-                        message: "date search: tapped suggestion \"\(suggestion.text)\""
+                        message: "date search: no suggestion chip appeared for \"\(dateQuery)\" (attempt \(attempt) of 3)"
                     )
-                } else {
+                    if attempt == 3 {
+                        await recordDateSearchMiss()
+                        break
+                    }
+                    // Close this search so the retry starts from a fresh one.
+                    try await clickDetectedTarget(CGPoint(x: 0.86, y: 0.94))
+                    try await pause(0.6)
+                }
+                if !tappedSuggestion {
                     emit(
                         type: "diagnostic",
                         step: "add_photos",
-                        message: "date search: no suggestion chip appeared for \"\(dateQuery)\", continuing without it"
+                        message: "date search: continuing without the date filter"
                     )
                 }
             } catch {
@@ -467,7 +644,7 @@ private final class BeliAutomation {
             step: "add_photos",
             message: "confirming photo selection: \"Photos\" tab at \(photosTab.center), tapping checkmark"
         )
-        click(CGPoint(x: 0.9, y: photosTab.center.y))
+        try click(CGPoint(x: 0.9, y: photosTab.center.y))
         try await dismissPhotoAccessPromptIfPresent()
         _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
         finish("add_photos")
@@ -489,7 +666,7 @@ private final class BeliAutomation {
         }
         if existingUpload == nil {
             let photosTab = try await waitForText("photos", timeout: 10) { $0.center.y < 0.25 }
-            click(CGPoint(x: 0.9, y: photosTab.center.y))
+            try click(CGPoint(x: 0.9, y: photosTab.center.y))
             try await dismissPhotoAccessPromptIfPresent()
             _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
         }
@@ -506,7 +683,29 @@ private final class BeliAutomation {
             let value = photoDescriptions[index].trimmingCharacters(in: .whitespacesAndNewlines)
             return value.isEmpty ? "Menu" : value
         }
-        try await addPhotoDescriptions(descriptions)
+        // Each row is matched back to its photo by thumbnail, so the dish names
+        // land on the right pictures whatever order Beli lists them in.
+        let targetImages = configuration.photoPaths.compactMap(Self.loadImage)
+        let targetPrints = targetImages.count == configuration.photoPaths.count
+            ? try targetImages.map { try Self.featurePrint(Self.centerSquare($0)) }
+            : []
+        let targetDescriptions = configuration.photoPaths.indices.map { index -> String in
+            guard let photoDescriptions = configuration.photoDescriptions,
+                  photoDescriptions.indices.contains(index) else {
+                return "Menu"
+            }
+            let value = photoDescriptions[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? "Menu" : value
+        }
+        if targetPrints.isEmpty {
+            try await addPhotoDescriptionsInOrder(descriptions)
+        } else {
+            try await reconcilePhotoDescriptions(
+                targetPrints: targetPrints,
+                targetDescriptions: targetDescriptions,
+                inOrder: descriptions
+            )
+        }
         let save = try await waitForText("save", timeout: 35) { $0.center.y < 0.18 }
         // Blindly double-tapping here (as clickThroughScreenshot does) risks the
         // second tap landing on whatever the review screen shows at this same
@@ -528,7 +727,9 @@ private final class BeliAutomation {
         finish("add_photo_descriptions")
     }
 
-    private func addPhotoDescriptions(_ descriptions: [String]) async throws {
+    // The original fill: the next empty row gets the next description, in the order the
+    // photos were picked. Only used when the list can't be read row by row.
+    private func addPhotoDescriptionsInOrder(_ descriptions: [String]) async throws {
         _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
         guard !descriptions.isEmpty else {
             throw AutomationFailure.message("No added photos were found to describe.")
@@ -547,7 +748,13 @@ private final class BeliAutomation {
                 break
             }
             guard filledCount < descriptions.count else {
-                throw AutomationFailure.message("Found more photos to describe than descriptions were provided.")
+                // Almost always an extra photo this run never selected -- a
+                // leftover from the picker's previous selection. Say so, since
+                // the fix is to remove it rather than to retype anything.
+                throw AutomationFailure.message(
+                    "Beli is showing \(filledCount + 1) photos but only \(descriptions.count) were added for this restaurant. "
+                        + "Remove the extra photo in Beli, then retry this step."
+                )
             }
             let description = descriptions[filledCount]
 
@@ -569,7 +776,7 @@ private final class BeliAutomation {
                 throw AutomationFailure.message("Could not open the description editor for photo \(filledCount + 1).")
             }
 
-            try await pause(0.6)
+            try await pause(0.4)
             try typeText(description)
 
             // Verify the text actually landed before moving on -- a focus click
@@ -608,6 +815,292 @@ private final class BeliAutomation {
         }
     }
 
+    // Same feature-print distance and cutoff as the picker; measured on a
+    // real Photo Upload screen: the right photo 0.758, an unrelated one 1.328.
+    // `top` is the thumbnail's top edge as a fraction of the screen height.
+    private func matchThumbnail(
+        top: CGFloat,
+        in image: CGImage,
+        targetPrints: [VNFeaturePrintObservation],
+        candidates: Set<Int>
+    ) throws -> (index: Int, distance: Float)? {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+        let rect = CGRect(
+            x: 0.067 * width,
+            y: top * height,
+            width: 0.221 * width,
+            height: 0.134 * height
+        ).integral.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        guard rect.width > 20, rect.height > 20, let crop = image.cropping(to: rect) else { return nil }
+
+        let rowPrint = try Self.featurePrint(Self.centerSquare(crop))
+        var best: (index: Int, distance: Float)?
+        for index in candidates {
+            let distance = try Self.featurePrintDistance(targetPrints[index], rowPrint)
+            if distance < Self.photoMatchCutoff, best == nil || distance < best!.distance {
+                best = (index, distance)
+            }
+        }
+        return best
+    }
+
+    // The list animates -- it slides in as the editor closes and bounces when
+    // scrolled -- so a prompt read mid-motion is somewhere else by the time it is
+    // tapped, and the tap opens a different row. Wait for two identical frames.
+    private func waitForSettledFrame(timeout: TimeInterval = 2.5) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        var previous: [Float]?
+        var steady = 0
+        while Date() < deadline {
+            let feature = imageFeature(try await capture.image())
+            if let previous, featureDistance(previous, feature) < 0.006 {
+                steady += 1
+                if steady >= 2 { return }
+            } else {
+                steady = 0
+            }
+            previous = feature
+            try await pause(0.22)
+        }
+    }
+
+    private func editDistance(_ first: String, _ second: String) -> Int {
+        let a = Array(first), b = Array(second)
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+        var previous = Array(0...b.count)
+        for i in 1...a.count {
+            var current = [i] + Array(repeating: 0, count: b.count)
+            for j in 1...b.count {
+                current[j] = min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)
+                )
+            }
+            previous = current
+        }
+        return previous[b.count]
+    }
+
+    // Whether the text OCR read on a row is the description meant for it. An
+    // empty read means the text was too small to trust, not that it is wrong.
+    private func descriptionAgrees(seen: String, expected: String) -> Bool {
+        let seenText = normalize(seen)
+        let expectedText = normalize(expected)
+        if seenText.contains("what s this") { return false }
+        if seenText.isEmpty || expectedText.isEmpty { return true }
+        if seenText.contains(expectedText) || expectedText.contains(seenText) { return true }
+        return editDistance(seenText, expectedText) <= max(2, expectedText.count / 3)
+    }
+
+    // One row of the Photo Upload list as it is on screen right now.
+    private struct PhotoListRow {
+        let target: Int?        // which of the restaurant's photos the thumbnail shows
+        let seen: String        // the text OCR read on the row
+        let prompt: OCRItem?    // the "What's this?" placeholder, present only while the row is empty
+    }
+
+    // Reads every row that is fully on screen. Rows are anchored on their "Mark as a
+    // favorite dish" label, which -- unlike the placeholder -- is always there.
+    private func readPhotoListRows(
+        in image: CGImage,
+        targetPrints: [VNFeaturePrintObservation]
+    ) throws -> (rows: [PhotoListRow], cutOffAbove: Bool) {
+        let items = try recognizeText(in: image)
+        let anchors = items
+            .filter { normalize($0.text).contains("mark as a favorite") }
+            .sorted { $0.center.y < $1.center.y }
+
+        var rows: [PhotoListRow] = []
+        var cutOffAbove = false
+        for anchor in anchors {
+            let top = anchor.center.y - 0.125
+            // Skip rows cut off by the header or the bottom edge.
+            if top < 0.15 { cutOffAbove = true }
+            guard top >= 0.15, top + 0.134 <= 0.97 else { continue }
+            let inRow = items
+                .filter {
+                    $0.x >= 0.30 && $0.center.y >= top - 0.005 && $0.center.y < top + 0.09
+                        && !normalize($0.text).contains("mark as a favorite")
+                }
+                .sorted { $0.center.y < $1.center.y }
+            let match = try matchThumbnail(
+                top: top,
+                in: image,
+                targetPrints: targetPrints,
+                candidates: Set(targetPrints.indices)
+            )
+            rows.append(PhotoListRow(
+                target: match?.index,
+                seen: inRow.map(\.text).joined(separator: " "),
+                prompt: inRow.first { normalize($0.text).contains("what s this") }
+            ))
+        }
+        return (rows, cutOffAbove)
+    }
+
+    // Opens one row's editor, types its description, and confirms it landed.
+    private func fillDescription(at prompt: OCRItem, _ description: String, label: String) async throws {
+        // A single tap silently failed to focus this field live -- but blindly
+        // double-tapping risks the second tap landing on the editor screen the
+        // first tap just opened, since a pushed detail screen doesn't share the
+        // list row's layout. Retry the tap and check each time whether the
+        // editor actually opened.
+        var editorOpened = false
+        for _ in 0..<5 {
+            try await clickDetectedTarget(prompt.center)
+            if try await findText("description", timeout: 2, predicate: { $0.center.y < 0.2 }) != nil {
+                editorOpened = true
+                break
+            }
+        }
+        guard editorOpened else {
+            throw AutomationFailure.message("Could not open the description editor for \(label).")
+        }
+
+        try await pause(0.4)
+        try typeText(description)
+
+        if try await findText(description, timeout: 2) == nil {
+            throw AutomationFailure.message("The description for \(label) did not receive the typed text.")
+        }
+
+        // Whether this is the last photo is exactly what we're trying to avoid
+        // predicting -- accept whichever of "Next"/"Done" the editor actually shows.
+        let button = try await waitForNextOrDoneButton()
+        try await clickDetectedTarget(button.center)
+    }
+
+    // Fills the list by reading it, not by counting. Each round waits for the list to
+    // stop moving, reads every row (which of the restaurant's photos it shows, and
+    // what text it carries), types into the first row that is still empty, and
+    // ends only when every one of the restaurant's photos shows its own text.
+    // Whatever made a description go missing -- a row that moved, a tap that missed,
+    // an editor that closed early -- the next read sees an empty row and fixes it,
+    // and a bad list can't be saved without being noticed.
+    private func reconcilePhotoDescriptions(
+        targetPrints: [VNFeaturePrintObservation],
+        targetDescriptions: [String],
+        inOrder descriptions: [String]
+    ) async throws {
+        _ = try await waitForText("photo upload", timeout: 20) { $0.center.y < 0.2 }
+
+        var typedCount: [Int: Int] = [:]
+        var verified = Set<Int>()
+        var unreadableRounds = 0
+        var idleScrolls = 0
+        let maxRounds = targetPrints.count * 4 + 6
+
+        for _ in 0..<maxRounds {
+            try await waitForSettledFrame()
+            let image = try await capture.image()
+            let (rows, cutOffAbove) = try readPhotoListRows(in: image, targetPrints: targetPrints)
+
+            // Not a list we can read (an editor still open, a screen mid-change).
+            if rows.isEmpty {
+                unreadableRounds += 1
+                if unreadableRounds >= 3 {
+                    emit(
+                        type: "diagnostic",
+                        step: "add_photo_descriptions",
+                        message: "photo list not readable row by row; filling rows in selection order instead"
+                    )
+                    try await addPhotoDescriptionsInOrder(descriptions)
+                    return
+                }
+                try await pause(0.4)
+                continue
+            }
+            unreadableRounds = 0
+
+            // Thumbnails that match none of our photos: either matching doesn't work
+            // here at all (use the old fill), or a photo that isn't ours is attached.
+            if rows.contains(where: { $0.target == nil }) {
+                if rows.allSatisfy({ $0.target == nil }) && verified.isEmpty && typedCount.isEmpty {
+                    emit(
+                        type: "diagnostic",
+                        step: "add_photo_descriptions",
+                        message: "no photo row matched this restaurant's photos; filling rows in selection order instead"
+                    )
+                    try await addPhotoDescriptionsInOrder(descriptions)
+                    return
+                }
+                throw AutomationFailure.message(
+                    "A photo in Beli's upload list isn't one of this restaurant's photos, so it was left alone. "
+                        + "It is most likely left over from an earlier attempt. Remove it in Beli, "
+                        + "or cancel the rating there and start it over, then retry."
+                )
+            }
+
+            // Rows already carrying text: confirm it is the right text. Wrong text on a
+            // row can't be typed over safely (the editor would append to it).
+            var wrong: [String] = []
+            for row in rows {
+                guard let target = row.target, row.prompt == nil else { continue }
+                if descriptionAgrees(seen: row.seen, expected: targetDescriptions[target]) {
+                    verified.insert(target)
+                } else {
+                    wrong.append("photo \(target + 1) shows \"\(row.seen)\" but should say \"\(targetDescriptions[target])\"")
+                }
+            }
+            if !wrong.isEmpty {
+                throw AutomationFailure.message(
+                    "Beli's photo list has the wrong text on a row, so nothing was saved: "
+                        + wrong.joined(separator: "; ")
+                        + ". Fix those rows in Beli, then retry."
+                )
+            }
+
+            // The first row still empty gets its own photo's description.
+            if let row = rows.first(where: { $0.prompt != nil }),
+               let prompt = row.prompt,
+               let target = row.target {
+                typedCount[target, default: 0] += 1
+                if typedCount[target]! > 3 {
+                    throw AutomationFailure.message(
+                        "Photo \(target + 1)'s description wouldn't stay on its row after three tries. "
+                            + "Check that row in Beli, then retry."
+                    )
+                }
+                emit(
+                    type: "diagnostic",
+                    step: "add_photo_descriptions",
+                    message: "row shows photo \(target + 1) and is empty; typing \"\(targetDescriptions[target])\" (try \(typedCount[target]!))"
+                )
+                try await fillDescription(at: prompt, targetDescriptions[target], label: "photo \(target + 1)")
+                idleScrolls = 0
+                continue
+            }
+
+            if verified.count == targetPrints.count {
+                emit(
+                    type: "diagnostic",
+                    step: "add_photo_descriptions",
+                    message: "photo list check: all \(targetPrints.count) photo(s) show their own description"
+                )
+                return
+            }
+
+            // Everything on screen is done but some photos haven't shown up yet:
+            // there are more rows -- above if the top one is cut off (the list can
+            // sit scrolled a little), otherwise below.
+            idleScrolls += 1
+            if idleScrolls > 3 { break }
+            try scrollPhotoUpload(up: cutOffAbove)
+            try await pause(0.4)
+        }
+
+        let missing = targetPrints.indices.filter { !verified.contains($0) }.map { String($0 + 1) }.joined(separator: ", ")
+        emit(
+            type: "diagnostic",
+            step: "add_photo_descriptions",
+            message: "photo(s) \(missing) of \(targetPrints.count) never showed their description in Beli's upload list"
+        )
+        throw AutomationFailure.photosNotFound
+    }
+
     private func waitForNextOrDoneButton() async throws -> OCRItem {
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
@@ -615,7 +1108,7 @@ private final class BeliAutomation {
             if let button = bestTextMatch("done", in: items) ?? bestTextMatch("next", in: items) {
                 return button
             }
-            try await pause(0.35)
+            try await pause(0.22)
         }
         throw AutomationFailure.message("Could not find a Next/Done button after entering a photo description.")
     }
@@ -654,8 +1147,8 @@ private final class BeliAutomation {
             }
             if unchangedScreens >= 2 { break }
             previousScreenFeature = screenFeature
-            scrollPhotoUpload()
-            try await pause(0.55)
+            try scrollPhotoUpload()
+            try await pause(0.4)
             scrolls += 1
         }
 
@@ -683,20 +1176,8 @@ private final class BeliAutomation {
             }
             if sharePageIsOpen || rankAgainIsOpen {
                 emit(type: "celebrate", step: nil, message: nil)
-                try await pause(5)
-                if sharePageIsOpen {
-                    try await clickDetectedTarget(CGPoint(x: 0.085, y: 0.15))
-                    let feed = try await waitForText("feed", timeout: 20) {
-                        $0.center.y > 0.8
-                    }
-                    try await clickDetectedTarget(feed.center)
-                } else {
-                    let search = try await waitForText("search", timeout: 20) {
-                        $0.center.y > 0.8
-                    }
-                    try await clickDetectedTarget(search.center)
-                }
-                _ = try await waitForText("search a restaurant", timeout: 20)
+                try await pause(2)
+                try await returnToFeed()
                 finish("finish_in_beli")
                 return
             }
@@ -707,18 +1188,43 @@ private final class BeliAutomation {
                 try await resolveAnyPendingDuels()
                 continue
             }
-            try await pause(0.8)
+            try await pause(0.5)
         }
         throw AutomationFailure.message("Timed out while waiting for Beli's share page.")
+    }
+
+    // Both completion screens (share page, or landing back on the restaurant's
+    // own page) have a back arrow at this same top-left spot, and popping it
+    // repeatedly unwinds whatever got pushed onto the nav stack during rating --
+    // rather than switching tabs from wherever we happen to land, which would
+    // leave that stack in place for the next restaurant to trip over. Verified
+    // by an actual screen change (not a fixed tap count) since there's no
+    // reliable way to OCR/detect the arrow icon itself.
+    private func returnToFeed() async throws {
+        let backArrowPoint = CGPoint(x: 0.085, y: 0.15)
+        for _ in 0..<10 {
+            let before = imageFeature(try await capture.image())
+            try click(backArrowPoint)
+            try await pause(0.5)
+            let after = imageFeature(try await capture.image())
+            if featureDistance(before, after) < 0.01 {
+                // Tapping here didn't change anything -- no back arrow left.
+                break
+            }
+        }
+
+        let feed = try await waitForText("feed", timeout: 20) { $0.center.y > 0.8 }
+        try await clickDetectedTarget(feed.center)
+        _ = try await waitForText("search restaurant", timeout: 20)
     }
 
     private func skipPhotos() async throws {
         start("add_photos")
         let pickerClosePoint = CGPoint(x: 0.107, y: 0.144)
         try await clickDetectedTarget(pickerClosePoint)
-        try await pause(0.8)
+        try await pause(0.5)
         try await clickDetectedTarget(pickerClosePoint)
-        try await pause(1)
+        try await pause(0.6)
         finish("add_photos")
         start("add_photo_descriptions")
         finish("add_photo_descriptions")
@@ -733,6 +1239,11 @@ private final class BeliAutomation {
         var unchangedPages = 0
         var page = 0
         var selectedOrder: [Int] = []
+        // Cells already clicked on the page currently shown. A click TOGGLES a
+        // photo, so clicking the same cell twice silently un-selects it; the
+        // grid doesn't move between clicks, so remembering them until it scrolls
+        // is enough.
+        var clickedCells = Set<Int>()
 
         // A photo can already be checked from an earlier attempt (the
         // system picker keeps its selection state across re-presenting in
@@ -754,7 +1265,7 @@ private final class BeliAutomation {
             var candidates: [(target: Int, cell: Int, distance: Float)] = []
 
             for targetIndex in remaining {
-                for (cellIndex, cellSignature) in cellSignatures.enumerated() {
+                for (cellIndex, cellSignature) in cellSignatures.enumerated() where !clickedCells.contains(cellIndex) {
                     let distance = try Self.featurePrintDistance(
                         targetSignatures[targetIndex],
                         cellSignature
@@ -778,17 +1289,24 @@ private final class BeliAutomation {
             // Vision's feature-print distance separates real matches from
             // near-misses far more cleanly than the old diff-hash did
             // (confirmed live: genuine matches ~0.78, unrelated photos
-            // 1.16+), so a plain absolute cutoff is enough -- no need for
+            // 1.16+, though look-alikes from the same meal reach 0.91 -- see
+            // photoMatchCutoff), so a plain absolute cutoff is enough -- no need for
             // the old hash's "must beat the runner-up by a margin" check,
             // which actively broke on duplicate/near-duplicate photos (a
             // photo saved twice makes its own best competitor its own
             // near-identical duplicate, so it could never win by a margin).
-            if let candidate = candidates.first(where: { $0.distance < 0.95 }) {
+            if let candidate = candidates.first(where: { $0.distance < Self.photoMatchCutoff }) {
                 try await clickDetectedTarget(cells[candidate.cell].point)
+                clickedCells.insert(candidate.cell)
                 remaining.remove(candidate.target)
                 selectedOrder.append(candidate.target)
+                emit(
+                    type: "diagnostic",
+                    step: "add_photos",
+                    message: "selected photo \(candidate.target + 1) of \(targetImages.count) at cell \(candidate.cell) (distance \(String(format: "%.3f", candidate.distance)))"
+                )
                 try saveSelectedPhotoOrder(selectedOrder)
-                try await pause(0.3)
+                try await pause(0.22)
                 continue
             }
 
@@ -801,8 +1319,9 @@ private final class BeliAutomation {
             }
             if unchangedPages >= 2 { break }
             previousGridFeature = gridFeature
-            scrollDown()
-            try await pause(0.65)
+            try scrollDown()
+            try await pause(0.45)
+            clickedCells.removeAll()
             page += 1
         }
 
@@ -968,7 +1487,7 @@ private final class BeliAutomation {
             try await clickDetectedTarget(cell.point)
             var cleared = false
             for _ in 0..<4 {
-                try await pause(0.5)
+                try await pause(0.35)
                 let recheck = try await capture.image()
                 let recheckCells = Self.gridCells(in: recheck)
                 guard let matching = recheckCells.first(where: {
@@ -987,6 +1506,62 @@ private final class BeliAutomation {
                     : "found a stale photo selection but could not confirm it cleared, continuing anyway"
             )
         }
+    }
+
+    // A date chip has to carry the WHOLE date. findText()'s matcher also accepts
+    // any fragment of its target (needle.contains(value)), which is how a stray
+    // "20" or "3" from elsewhere on screen got tapped as the chip in a live run.
+    // Month abbreviations are accepted too ("Aug 30, 2026"), since that is how
+    // the picker may spell it.
+    private func isDateChip(_ text: String, for dateQuery: String) -> Bool {
+        let wanted = normalize(dateQuery).split(separator: " ").map(String.init)
+        guard wanted.count == 3 else { return normalize(text).contains(normalize(dateQuery)) }
+        let tokens = Set(normalize(text).split(separator: " ").map(String.init))
+        let monthMatches = tokens.contains(wanted[0]) || tokens.contains(String(wanted[0].prefix(3)))
+        return monthMatches && tokens.contains(wanted[1]) && tokens.contains(wanted[2])
+    }
+
+    private func waitForDateChip(_ dateQuery: String, timeout: TimeInterval) async throws -> OCRItem? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let items = try recognizeText(in: await capture.image())
+            // Above the search bar, where the suggestions list; the typed text in
+            // the field itself sits lower and must not count.
+            let chips = items.filter { $0.center.y < 0.9 && isDateChip($0.text, for: dateQuery) }
+            if let chip = chips.max(by: { $0.confidence < $1.confidence }) { return chip }
+            try await pause(0.22)
+        }
+        return nil
+    }
+
+    // When the chip never shows, keep what was on screen -- the only way to tell
+    // "the chip is spelled differently" from "the text never reached the field".
+    private func recordDateSearchMiss() async {
+        guard let image = try? await capture.image() else { return }
+        saveDebugImage(image, named: "date-search-failed.png")
+        let seen = ((try? recognizeText(in: image)) ?? [])
+            .filter { $0.center.y > 0.4 }
+            .map { "\"\($0.text)\"@\(String(format: "%.2f", $0.center.y))" }
+            .joined(separator: ", ")
+        emit(
+            type: "diagnostic",
+            step: "add_photos",
+            message: "date search: screen text when the chip never appeared: \(seen)"
+        )
+    }
+
+    private func saveDebugImage(_ image: CGImage, named name: String) {
+        guard let debugDirectory = configuration.debugDirectory else { return }
+        let url = URL(fileURLWithPath: debugDirectory).appendingPathComponent(name)
+        try? Foundation.FileManager().removeItem(at: url)
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL,
+            "public.png" as CFString,
+            1,
+            nil
+        ) else { return }
+        CGImageDestinationAddImage(destination, image, nil)
+        CGImageDestinationFinalize(destination)
     }
 
     private func savePhotoDebugImage(_ image: CGImage) {
@@ -1142,7 +1717,7 @@ private final class BeliAutomation {
             guard let monthHeaderY = items.first(where: {
                 $0.center.y > 0.12 && $0.center.y < 0.34 && monthYear(from: $0.text) != nil
             })?.center.y else {
-                try await pause(0.35)
+                try await pause(0.22)
                 continue
             }
 
@@ -1166,7 +1741,7 @@ private final class BeliAutomation {
             }) {
                 return closest
             }
-            try await pause(0.35)
+            try await pause(0.22)
         }
         throw AutomationFailure.message("The visit day could not be found in Beli's calendar.")
     }
@@ -1188,7 +1763,11 @@ private final class BeliAutomation {
                 // which then made every subsequent nudge target the wrong
                 // row entirely). Re-checking after a beat confirms the
                 // position has actually stopped moving before trusting it.
-                try await pause(0.3)
+                // Trimmed lighter than the bare filler pauses elsewhere: a
+                // wrong reading here doesn't silently stick -- settingVisitDate
+                // independently re-reads and throws if the final month/year
+                // don't match, so this only risks more retries, not bad data.
+                try await pause(0.22)
                 let settledItems = try recognizeText(in: await capture.image())
                 guard let settled = settledItems.first(where: {
                     $0.center.y > 0.12 && $0.center.y < 0.34 && monthYear(from: $0.text) != nil
@@ -1212,7 +1791,7 @@ private final class BeliAutomation {
                         + (nearby.isEmpty ? "(none)" : nearby)
                 )
             }
-            try await pause(0.35)
+            try await pause(0.22)
         }
         throw AutomationFailure.message("Beli's visible calendar month could not be read.")
     }
@@ -1311,7 +1890,7 @@ private final class BeliAutomation {
                         message: "visit date picker: no row detected near the selection band"
                     )
                 }
-                try await pause(0.3)
+                try await pause(0.22)
                 continue
             }
             knownYear = selection.year
@@ -1324,8 +1903,11 @@ private final class BeliAutomation {
                 // match that the collapsed grid then showed as unset,
                 // because the wheel had drifted back off it by the time
                 // the close tap landed). Re-checking after settling
-                // catches that instead of trusting a single frame.
-                try await pause(0.5)
+                // catches that instead of trusting a single frame. Trimmed
+                // lighter than bare filler pauses since a miss here just
+                // retries (settingVisitDate's final check catches a wrong
+                // date too), not silent bad data.
+                try await pause(0.35)
                 guard let settled = try await readWheelSelection(headerY: headerY, knownYear: knownYear),
                       settled.month == targetMonth, settled.year == targetYear else {
                     emit(
@@ -1351,7 +1933,7 @@ private final class BeliAutomation {
                 message: "visit date picker: read \"\(selection.text)\", nudging \(down ? "down" : "up")"
             )
             nudgeWheel(at: selection.point, down: down)
-            try await pause(0.5)
+            try await pause(0.35)
         }
 
         try await clickDetectedTarget(CGPoint(x: visibleMonth.x, y: headerY))
@@ -1400,7 +1982,11 @@ private final class BeliAutomation {
             if let match = bestTextMatch(target, in: items.filter(predicate)) {
                 return match
             }
-            try await pause(0.35)
+            // The capture stream only delivers a fresh frame every ~200ms
+            // (minimumFrameInterval = 1/5 in StreamingPhoneScreenshot), so
+            // polling faster than that just re-reads the same stale frame --
+            // this sits just above that floor.
+            try await pause(0.22)
         }
         return nil
     }
@@ -1437,7 +2023,16 @@ private final class BeliAutomation {
         return items
             .filter { item in
                 let value = normalize(item.text)
-                return value.contains(needle) || needle.contains(value)
+                if value.contains(needle) { return true }
+                // OCR sometimes splits a phrase, and Beli rewords labels, so a piece
+                // of the target counts -- the bottom "Search" tab has been standing
+                // in for the reworded search box this whole time. But not a tiny
+                // piece: a 1-3 character fragment (an avatar's "K", a stray "20" or
+                // "3") is a substring of almost any phrase, and used to be accepted
+                // as the target. The notes step "found" its placeholder in a
+                // friend's initial, and a date search tapped "3" as if it were
+                // "August 30, 2026".
+                return value.count >= 4 && needle.contains(value)
             }
             .max { first, second in
                 let firstExact = normalize(first.text) == needle ? 1 : 0
@@ -1447,19 +2042,112 @@ private final class BeliAutomation {
             }
     }
 
-    private func activatePhoneWindow() {
-        guard let app = NSRunningApplication(processIdentifier: capture.window.owningApplication?.processID ?? 0) else {
-            return
-        }
-        app.activate(options: [])
+    private var phoneProcessID: pid_t {
+        capture.window.owningApplication?.processID ?? 0
     }
 
-    private func click(_ normalizedPoint: CGPoint) {
-        activatePhoneWindow()
-        let point = CGPoint(
-            x: capture.window.frame.minX + normalizedPoint.x * capture.window.frame.width,
-            y: capture.window.frame.minY + normalizedPoint.y * capture.window.frame.height
+    // Screen capture reads the phone window's own surface, so OCR and photo
+    // matching work fine while another app covers it -- but clicks, scrolls and
+    // keystrokes go to whatever is actually on top (a click lands in the
+    // covering app, and typed text is typed into it). NSRunningApplication's
+    // activate() is only a request, and macOS ignores it from a background
+    // process while another app is frontmost, so the phone just stayed behind
+    // whatever was last clicked. Setting AXFrontmost -- what System Events does
+    // when the workspace is tiled -- raises it for real.
+    private func activatePhoneWindow() {
+        let pid = phoneProcessID
+        guard pid != 0 else { return }
+        AXUIElementSetAttributeValue(
+            AXUIElementCreateApplication(pid),
+            kAXFrontmostAttribute as CFString,
+            kCFBooleanTrue
         )
+        NSRunningApplication(processIdentifier: pid)?.activate(options: [])
+    }
+
+    // Owner of the frontmost real window on screen, read straight from the
+    // window server so it can't be stale. Tiny or transparent helper windows
+    // are skipped; they can't be what's covering the phone.
+    private func frontmostWindowOwner() -> (pid: pid_t, name: String)? {
+        let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        for window in windows {
+            guard (window[kCGWindowLayer as String] as? Int) == 0,
+                  (window[kCGWindowAlpha as String] as? Double ?? 1) > 0.01,
+                  let boundsDictionary = window[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
+                  bounds.width >= 80, bounds.height >= 80,
+                  let pid = window[kCGWindowOwnerPID as String] as? pid_t
+            else { continue }
+            return (pid, window[kCGWindowOwnerName as String] as? String ?? "another app")
+        }
+        return nil
+    }
+
+    // Raises the phone and confirms it is on top before any input is sent.
+    // Throws instead of acting on the wrong window, since a stray click or
+    // keystroke in another app does real damage and a clear error doesn't.
+    private func ensurePhoneInFront() throws {
+        var coveredBy = "another app"
+        for _ in 0..<20 {
+            guard let owner = frontmostWindowOwner() else { return }
+            if owner.pid == phoneProcessID { return }
+            coveredBy = owner.name
+            activatePhoneWindow()
+            usleep(150_000)
+        }
+        throw AutomationFailure.message(
+            "iPhone Mirroring is behind \(coveredBy), so this step was stopped instead of clicking into it. "
+                + "Bring iPhone Mirroring to the front and retry."
+        )
+    }
+
+    // SCWindow.frame is a snapshot from when capture started, but the workspace
+    // tiler (or the user) can still be moving the window around then, and every
+    // click is aimed from this frame. Read the current bounds each time.
+    private func liveWindowFrame() -> CGRect {
+        guard let info = CGWindowListCopyWindowInfo(
+                [.optionIncludingWindow],
+                capture.window.windowID
+              ) as? [[String: Any]],
+              let boundsDictionary = info.first?[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
+              frame.width > 0, frame.height > 0
+        else { return capture.window.frame }
+        return frame
+    }
+
+    private func click(_ normalizedPoint: CGPoint) throws {
+        try ensurePhoneInFront()
+        let frame = liveWindowFrame()
+        if !reportedWindowMove,
+           abs(frame.minX - capture.window.frame.minX) > 2 || abs(frame.minY - capture.window.frame.minY) > 2 {
+            reportedWindowMove = true
+            emit(
+                type: "diagnostic",
+                step: nil,
+                message: "phone window moved after capture started: \(capture.window.frame) -> \(frame)"
+            )
+        }
+        let point = CGPoint(
+            x: frame.minX + normalizedPoint.x * frame.width,
+            y: frame.minY + normalizedPoint.y * frame.height
+        )
+        // Put the real cursor on the target before pressing. iPhone Mirroring turns
+        // the pointer into touches, and a press posted at a position the cursor
+        // never visited doesn't reliably land there -- the cursor stayed wherever
+        // it was and the tap missed (seen live: the + button was "tapped" with the
+        // cursor nowhere near it). The scroll code already moves the cursor first.
+        CGWarpMouseCursorPosition(point)
+        CGEvent(
+            mouseEventSource: eventSource,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: point,
+            mouseButton: .left
+        )?.post(tap: .cghidEventTap)
+        usleep(90_000)
         let down = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
         let up = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
         down?.post(tap: .cghidEventTap)
@@ -1469,18 +2157,21 @@ private final class BeliAutomation {
 
     private func clickThroughScreenshot(_ normalizedPoint: CGPoint) async throws {
         try await pause(0.25)
-        click(normalizedPoint)
-        try await pause(1)
-        click(normalizedPoint)
+        try click(normalizedPoint)
+        // Kept well above the other settle pauses -- too short a gap risks the
+        // OS reading these two taps as one double-click gesture instead of two
+        // independent ones.
+        try await pause(0.9)
+        try click(normalizedPoint)
     }
 
     private func clickDetectedTarget(_ normalizedPoint: CGPoint) async throws {
-        click(normalizedPoint)
-        try await pause(0.35)
+        try click(normalizedPoint)
+        try await pause(0.22)
     }
 
-    private func scrollDown() {
-        activatePhoneWindow()
+    private func scrollDown() throws {
+        try ensurePhoneInFront()
         let point = globalPoint(CGPoint(x: 0.5, y: 0.62))
         CGWarpMouseCursorPosition(point)
         CGEvent(
@@ -1503,8 +2194,8 @@ private final class BeliAutomation {
         }
     }
 
-    private func scrollPhotoUpload() {
-        activatePhoneWindow()
+    private func scrollPhotoUpload(up: Bool = false) throws {
+        try ensurePhoneInFront()
         let point = globalPoint(CGPoint(x: 0.5, y: 0.7))
         CGWarpMouseCursorPosition(point)
         CGEvent(
@@ -1518,21 +2209,25 @@ private final class BeliAutomation {
             scrollWheelEvent2Source: eventSource,
             units: .pixel,
             wheelCount: 1,
-            wheel1: -260,
+            wheel1: up ? 260 : -260,
             wheel2: 0,
             wheel3: 0
         )?.post(tap: .cghidEventTap)
     }
 
     private func globalPoint(_ normalizedPoint: CGPoint) -> CGPoint {
-        CGPoint(
-            x: capture.window.frame.minX + normalizedPoint.x * capture.window.frame.width,
-            y: capture.window.frame.minY + normalizedPoint.y * capture.window.frame.height
+        let frame = liveWindowFrame()
+        return CGPoint(
+            x: frame.minX + normalizedPoint.x * frame.width,
+            y: frame.minY + normalizedPoint.y * frame.height
         )
     }
 
     private func typeText(_ text: String) throws {
-        activatePhoneWindow()
+        // Keystrokes go to whatever app is frontmost, not to a window under the
+        // cursor, so this matters more here than for clicks.
+        try ensurePhoneInFront()
+        let phoneName = capture.window.owningApplication?.applicationName ?? "iPhone Mirroring"
         let characterDelays = text.map { _ in
             String(Int.random(in: 30...50))
         }.joined(separator: ",")
@@ -1546,6 +2241,8 @@ private final class BeliAutomation {
             "-e",
             "set delayText to item 2 of argv",
             "-e",
+            "set phoneName to item 3 of argv",
+            "-e",
             "set previousDelimiters to AppleScript's text item delimiters",
             "-e",
             "set AppleScript's text item delimiters to \",\"",
@@ -1558,7 +2255,17 @@ private final class BeliAutomation {
             "-e",
             "tell application \"System Events\"",
             "-e",
+            "set frontmost of process phoneName to true",
+            "-e",
+            "delay 0.15",
+            "-e",
             "repeat with currentCharacter in characters of inputText",
+            "-e",
+            "if (characterIndex mod 6) is 1 then",
+            "-e",
+            "if (name of first application process whose frontmost is true) is not phoneName then error \"FOCUS_LOST\"",
+            "-e",
+            "end if",
             "-e",
             "keystroke (currentCharacter as text)",
             "-e",
@@ -1574,15 +2281,27 @@ private final class BeliAutomation {
             "--",
             text,
             characterDelays,
+            phoneName,
         ]
         typing.standardOutput = FileHandle.nullDevice
-        typing.standardError = FileHandle.nullDevice
+        let typingErrors = Pipe()
+        typing.standardError = typingErrors
         try typing.run()
         typing.waitUntilExit()
         guard typing.terminationStatus == 0 else {
+            // The script re-checks the frontmost app as it types and stops the
+            // moment it isn't the phone, rather than finishing the text into
+            // whatever the user clicked on.
+            let detail = String(data: typingErrors.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            if detail.contains("FOCUS_LOST") {
+                throw AutomationFailure.message(
+                    "\(phoneName) lost focus while typing, so typing stopped instead of going into another app. "
+                        + "Leave it in front until the run finishes, then retry."
+                )
+            }
             throw AutomationFailure.message("macOS could not type into iPhone Mirroring.")
         }
-        usleep(500_000)
+        usleep(200_000)
     }
 
     private static func findTealCircle(in image: CGImage) -> CGPoint? {
@@ -1598,7 +2317,12 @@ private final class BeliAutomation {
             let red = Int(pixels[offset])
             let green = Int(pixels[offset + 1])
             let blue = Int(pixels[offset + 2])
-            return green > red + 12 && blue > red + 12 && green > 65 && blue > 65
+            // Beli's teal is DARK (about 37, 76, 87). Without the red ceiling any
+            // pale blue passed -- the East River on the restaurant page's map scored
+            // full marks, and since the scan stops at the first near-perfect ring it
+            // beat the real button, which sits lower. The click then went to the
+            // water (live: 0.838, 0.368 instead of the button at 0.803, 0.400).
+            return green > red + 12 && blue > red + 12 && green > 65 && blue > 65 && red < 130
         }
 
         // The title/rating row (and thus the +/bookmark row below it) shifts down when a
@@ -2267,18 +2991,62 @@ private func runOCRFixture(path: String) throws {
     print(String(decoding: data, as: UTF8.self))
 }
 
+// macOS grants Accessibility and Screen Recording to the app that launched
+// this process, not to this binary -- normally the terminal running
+// `pnpm dev`, but whichever app it is, that's the row to allow. Naming the
+// binary instead sends people hunting for a row that was never in the list,
+// so walk up to the owning .app and name that.
+private func launchingAppName() -> String? {
+    var pid = getppid()
+    // The outermost .app wins, not the first one found: a host app can run
+    // this by way of its own nested helper bundles, and it's the top-level
+    // app that System Settings lists and that the permission is granted to.
+    var outermost: String?
+
+    // Bounded so a parent cycle or an unexpectedly deep tree can't spin here.
+    for _ in 0..<16 {
+        guard pid > 1 else { break }
+
+        var pathBuffer = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
+        if proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count)) > 0 {
+            let path = String(cString: pathBuffer)
+            // ".../Foo.app/Contents/MacOS/Foo" -> "Foo"
+            if let range = path.range(of: ".app/Contents/") {
+                let bundlePath = String(path[path.startIndex..<range.lowerBound])
+                let name = (bundlePath as NSString).lastPathComponent
+                if !name.isEmpty { outermost = name }
+            }
+        }
+
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0 else { break }
+
+        let parent = info.kp_eproc.e_ppid
+        guard parent != pid else { break }
+        pid = parent
+    }
+
+    return outermost
+}
+
+private func permissionMessage(for pane: String) -> String {
+    let app = launchingAppName() ?? "the app you ran pnpm dev from"
+    return "Allow \(app) in System Settings → Privacy & Security → \(pane), "
+        + "then restart it and try again."
+}
+
 private func requireAutomationPermissions() throws {
     let accessibilityOptions = [
         kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true,
     ] as CFDictionary
     guard AXIsProcessTrustedWithOptions(accessibilityOptions) else {
-        throw AutomationFailure.message(
-            "Allow Auto Beli in System Settings → Privacy & Security → Accessibility, then try again."
-        )
+        throw AutomationFailure.message(permissionMessage(for: "Accessibility"))
     }
     guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
         throw AutomationFailure.message(
-            "Allow Auto Beli in System Settings → Privacy & Security → Screen & System Audio Recording, then try again."
+            permissionMessage(for: "Screen & System Audio Recording")
         )
     }
 }

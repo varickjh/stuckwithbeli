@@ -30,6 +30,11 @@ type StartAutomationInput = {
     existingRatings: Record<string, number>;
     computedScore: number | null;
     photos: File[];
+    // Beli's own "finish" flow already navigates back to the search-a-
+    // restaurant screen, so a queued run that follows one right after
+    // doesn't need to reopen the app from scratch -- pass "find_restaurant"
+    // to start there instead. Defaults to "open_beli" (a fresh app open).
+    startStep?: RankingStepId | null;
 };
 
 type SessionRecord = RankingSessionStatus & {
@@ -279,12 +284,13 @@ export async function startBeliAutomation(input: StartAutomationInput) {
         }),
     );
 
+    const startStep = input.startStep ?? "open_beli";
     const session: SessionRecord = {
         id: sessionId,
         clusterId: input.clusterId,
         state: "running",
         celebrating: false,
-        steps: freshSteps("open_beli"),
+        steps: freshSteps(startStep),
         error: null,
         recovery: null,
         duelLog: [],
@@ -296,7 +302,7 @@ export async function startBeliAutomation(input: StartAutomationInput) {
         cleanupTimer: null,
     };
     sessions.set(sessionId, session);
-    launchSession(session, "open_beli");
+    launchSession(session, startStep);
     return getBeliAutomationStatus(sessionId)!;
 }
 

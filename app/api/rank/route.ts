@@ -46,6 +46,21 @@ const rankingRequestSchema = z.object({
         (value) => (typeof value === "string" && value ? Number(value) : value),
         z.number().min(0).max(10).nullable().default(null),
     ),
+    startStep: z
+        .enum([
+            "open_beli",
+            "find_restaurant",
+            "start_rating",
+            "choose_category",
+            "add_rating",
+            "add_notes",
+            "set_visit_date",
+            "add_photos",
+            "add_photo_descriptions",
+            "finish_in_beli",
+        ])
+        .nullable()
+        .default(null),
 });
 
 const retryRequestSchema = z.object({
@@ -110,6 +125,7 @@ export async function POST(request: Request) {
             visitDate: formData.get("visitDate"),
             existingRatings: formData.get("existingRatings"),
             computedScore: formData.get("computedScore"),
+            startStep: formData.get("startStep"),
         });
         const photos = formData
             .getAll("photos")
